@@ -1,0 +1,1805 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowUpLeft,
+  ArrowLeft,
+  Bell,
+  BookOpen,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Cloud,
+  CloudOff,
+  Download,
+  FileText,
+  FolderPlus,
+  Globe2,
+  Home,
+  Layers3,
+  Leaf,
+  Menu,
+  Plus,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  TrendingUp,
+  Upload,
+  WifiOff,
+  X,
+} from "lucide-react";
+import type { Collection, Project, Row, Store } from "./types";
+import {
+  createProject,
+  demoStore,
+  LISTS,
+  nextKeyword,
+  nextPage,
+  SCHEMAS,
+  summarize,
+  keywordLookup,
+  resultLookup,
+  normalizeKeyword,
+  duplicates,
+  validateStore,
+} from "./domain";
+import {
+  downloadJson,
+  listBackups,
+  loadLocal,
+  recoverLocal,
+  saveLocal,
+} from "./storage";
+import type { Stored } from "./storage";
+import { KeywordWorkspace } from "./components/KeywordWorkspace";
+import {
+  PageWorkspace,
+  ContentWorkspace,
+  ResultsWorkspace,
+} from "./components/PageWorkspaces";
+
+type View = "start" | Collection | "settings";
+const NAV = [
+  { key: "start", label: "نمای کلی", sub: "مسیر و قدم بعدی", icon: Home },
+  { key: "keywords", label: "کلمات کلیدی", sub: "کشف و تصمیم", icon: Search },
+  { key: "pages", label: "نقشه صفحات", sub: "هدف‌گذاری و سئو", icon: Layers3 },
+  {
+    key: "content",
+    label: "محتوا و تقویم",
+    sub: "از بریف تا انتشار",
+    icon: FileText,
+  },
+  {
+    key: "results",
+    label: "نتایج و بهبود",
+    sub: "اندازه‌گیری اثر",
+    icon: TrendingUp,
+  },
+  {
+    key: "settings",
+    label: "تنظیمات و راهنما",
+    sub: "پروژه، پشتیبان و فیلدها",
+    icon: Settings2,
+  },
+] as const;
+const fa = (n: number) => new Intl.NumberFormat("fa-IR").format(n);
+const dateLabel = () =>
+  new Intl.DateTimeFormat("fa-IR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "Asia/Tehran",
+  }).format(new Date());
+async function api(path: string, body?: unknown, method?: string) {
+  const r = await fetch("/api/" + path, {
+    signal: AbortSignal.timeout(20000),
+    method: method ?? (body ? "POST" : "GET"),
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let payload;
+  try {
+    payload = await r.json();
+  } catch {
+    throw new Error("سرویس ابری در این اجرا در دسترس نیست.");
+  }
+  if (!r.ok) {
+    throw new Error(
+      r.status === 409
+        ? "نسخه ابری تغییر کرده؛ همگام‌سازی متوقف شد. ابتدا نسخه ابری را دریافت کنید."
+        : (payload.error ?? "ارتباط با ابر انجام نشد."),
+    );
+  }
+  return payload;
+}
+
+export default function App() {
+  const [store, setStore] = useState<Store | null>(null);
+  const [view, setView] = useState<View>("start");
+  const [toast, setToast] = useState("");
+  const [saveStatus, setSaveStatus] = useState("loading");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [sidebar, setSidebar] = useState(false);
+  const [newProject, setNewProject] = useState(false);
+  const [name, setName] = useState("");
+  const [domain, setDomain] = useState("");
+  const [cloud, setCloud] = useState({
+    configured: false,
+    authenticated: false,
+    active: false,
+    revision: 0,
+  });
+  const [cloudStatus, setCloudStatus] = useState("local");
+  const [cloudError, setCloudError] = useState("");
+  const [readOnly, setReadOnly] = useState(false);
+  const flushLocalPending = useRef<(() => void) | null>(null);
+  const onlineRef = useRef(navigator.onLine);
+  const ownsTab = useRef(!navigator.locks);
+  const cloudEpoch = useRef(0),
+    transferInProgress = useRef(false),
+    autosaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+      undefined,
+    );
+  const damagedLocal = useRef<unknown>(null),
+    forceBackup = useRef(false);
+  const localRevision = useRef(0),
+    ready = useRef(false),
+    saving = useRef(Promise.resolve()),
+    latest = useRef<Store | null>(null),
+    unsaved = useRef(false),
+    cloudRef = useRef(cloud),
+    cloudBusy = useRef(false),
+    cloudPending = useRef(false),
+    cloudStateRef = useRef<Store | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  if (store) latest.current = store;
+  const notify = useCallback((s: string) => {
+    setToast(s);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 5000);
+  }, []);
+  useEffect(() => {
+    cloudRef.current = cloud;
+  }, [cloud]);
+  useEffect(() => {
+    onlineRef.current = online;
+  }, [online]);
+  useEffect(() => {
+    let mounted = true;
+    loadLocal()
+      .then((local) => {
+        if (!mounted) return;
+        damagedLocal.current = local;
+        const state = local ? validateStore(local.state) : demoStore();
+        if (
+          local &&
+          (!Number.isSafeInteger(local.revision) ||
+            local.revision < 1 ||
+            !Number.isFinite(Date.parse(local.savedAt)))
+        )
+          throw new Error(
+            "نسخه محلی معتبر نیست؛ داده خام را برای بازیابی دانلود کنید.",
+          );
+        localRevision.current = local?.revision ?? 0;
+        damagedLocal.current = null;
+        ready.current = true;
+        setStore(state);
+        setSaveStatus(local ? "saved" : "pending");
+      })
+      .catch((e) => {
+        if (!mounted) return;
+        setSaveStatus("error");
+        setReadOnly(true);
+        notify(e.message);
+        setStore(demoStore());
+      });
+    api("status")
+      .then((r) => {
+        if (mounted) setCloud({ ...r, active: false, revision: 0 });
+      })
+      .catch((e) => {
+        if (mounted && e instanceof TypeError) setOnline(false);
+      });
+    const on = () => setOnline(true),
+      off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    const unload = (e: BeforeUnloadEvent) => {
+      if (unsaved.current) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => {
+      mounted = false;
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+      window.removeEventListener("beforeunload", unload);
+    };
+  }, [notify]);
+  useEffect(() => {
+    if (!navigator.locks) return;
+    let release: () => void = () => {};
+    navigator.locks.request(
+      "rooyesh-edit-lock",
+      { ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          setReadOnly(true);
+          return;
+        }
+        ownsTab.current = true;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    );
+    return () => release();
+  }, []);
+  const syncCloud = useCallback(async (state: Store) => {
+    if (!cloudRef.current.active) return;
+    cloudStateRef.current = state;
+    cloudPending.current = true;
+    if (cloudBusy.current || !onlineRef.current) {
+      setCloudStatus("pending");
+      return;
+    }
+    cloudBusy.current = true;
+    try {
+      while (cloudPending.current) {
+        cloudPending.current = false;
+        const next = cloudStateRef.current!;
+        setCloudStatus("syncing");
+        const r = await api(
+          "state",
+          { state: next, revision: cloudRef.current.revision },
+          "PUT",
+        );
+        cloudRef.current = { ...cloudRef.current, revision: r.revision };
+        setCloud((c) => ({ ...c, revision: r.revision }));
+      }
+      setCloudStatus("synced");
+      setCloudError("");
+    } catch (e) {
+      cloudPending.current = true;
+      if (e instanceof TypeError || (e as Error).name === "TimeoutError") {
+        setCloudStatus("pending");
+        setOnline(false);
+        setCloudError("");
+      } else {
+        setCloudStatus("error");
+        setCloudError((e as Error).message);
+        cloudRef.current = { ...cloudRef.current, active: false };
+        setCloud((c) => ({ ...c, active: false }));
+      }
+    } finally {
+      cloudBusy.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (!store || !ready.current || readOnly) return;
+    latest.current = store;
+    unsaved.current = true;
+    setSaveStatus("pending");
+    const epoch = cloudEpoch.current;
+    let committed = false;
+    const persist = () => {
+      if (committed) return;
+      committed = true;
+      saving.current = saving.current.then(async () => {
+        try {
+          const r = await saveLocal(
+            store,
+            localRevision.current,
+            forceBackup.current,
+          );
+          localRevision.current = r.revision;
+          if (latest.current === store) {
+            forceBackup.current = false;
+          }
+          if (latest.current === store) {
+            unsaved.current = false;
+            setSaveStatus("saved");
+          }
+          if (epoch === cloudEpoch.current) void syncCloud(store);
+        } catch (e) {
+          setSaveStatus("error");
+          setReadOnly(true);
+          notify((e as Error).message);
+        }
+      });
+    };
+    const timeout = setTimeout(persist, 400);
+    autosaveTimer.current = timeout;
+    flushLocalPending.current = persist;
+    return () => {
+      clearTimeout(timeout);
+      if (flushLocalPending.current === persist)
+        flushLocalPending.current = null;
+    };
+  }, [store, notify, readOnly, syncCloud]);
+  useEffect(() => {
+    if (
+      online &&
+      cloudRef.current.active &&
+      cloudPending.current &&
+      latest.current
+    )
+      void syncCloud(latest.current);
+  }, [online, syncCloud]);
+  useEffect(() => {
+    const flush = () => {
+      if (document.visibilityState === "hidden") flushLocalPending.current?.();
+    };
+    const hide = () => flushLocalPending.current?.();
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", hide);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", hide);
+    };
+  }, []);
+  useEffect(() => {
+    if (online || !cloud.active) return;
+    const timer = setInterval(() => {
+      api("status")
+        .then((r) => {
+          if (r.configured) setOnline(true);
+        })
+        .catch(() => {});
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [online, cloud.active]);
+  const mutate = useCallback(
+    (fn: (s: Store) => Store) => {
+      if (transferInProgress.current) {
+        notify("انتقال داده در حال انجام است؛ چند لحظه صبر کنید.");
+        return;
+      }
+      if (readOnly) {
+        notify("برای ویرایش، تب دیگر را ببندید و این صفحه را تازه کنید.");
+        return;
+      }
+      setStore((s) => {
+        if (!s) return s;
+        const next = fn(s);
+        const count = next.projects.reduce(
+          (n, p) =>
+            n +
+            p.keywords.length +
+            p.pages.length +
+            p.content.length +
+            p.results.length,
+          0,
+        );
+        if (count > 120000) {
+          notify(
+            "ظرفیت این فضای کاری ۱۲۰٬۰۰۰ رکورد در مجموع پروژه‌هاست؛ یک پشتیبان جدا برای پروژه‌های قدیمی نگه دارید.",
+          );
+          return s;
+        }
+        return next;
+      });
+    },
+    [readOnly, notify],
+  );
+  const navigate = (v: View) => {
+    setView(v);
+    setSidebar(false);
+    window.scrollTo({ top: 0 });
+  };
+
+  const replaceStore = async (incoming: Store) => {
+    const next = validateStore(incoming);
+    if (readOnly && !ownsTab.current)
+      throw new Error(
+        "این تب فقط برای مشاهده است؛ بازیابی از تب فعال انجام می‌شود.",
+      );
+    if (saveStatus === "error") {
+      const recovered = await recoverLocal(next);
+      localRevision.current = recovered.revision;
+      damagedLocal.current = null;
+      ready.current = true;
+      latest.current = next;
+      unsaved.current = false;
+      cloudEpoch.current++;
+      cloudRef.current = { ...cloudRef.current, active: false };
+      setCloud((c) => ({ ...c, active: false }));
+      setCloudStatus("local");
+      setReadOnly(false);
+      setSaveStatus("saved");
+      setStore(next);
+    } else {
+      forceBackup.current = true;
+      mutate(() => next);
+    }
+  };
+  const transferCloud = async (direction: "pull" | "push") => {
+    if (readOnly)
+      throw new Error(
+        "این تب فقط برای مشاهده است؛ انتقال ابری از تب فعال انجام می‌شود.",
+      );
+    if (transferInProgress.current)
+      throw new Error("انتقال دیگری در حال انجام است.");
+    transferInProgress.current = true;
+    cloudEpoch.current++;
+    cloudRef.current = { ...cloudRef.current, active: false };
+    setCloud((c) => ({ ...c, active: false }));
+    setCloudStatus("local");
+    clearTimeout(autosaveTimer.current);
+    flushLocalPending.current = null;
+    try {
+      while (cloudBusy.current)
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      cloudPending.current = false;
+      await saving.current;
+      const snapshot = latest.current ?? store!;
+      if (unsaved.current) {
+        const saved = await saveLocal(snapshot, localRevision.current);
+        localRevision.current = saved.revision;
+        unsaved.current = false;
+        setSaveStatus("saved");
+      }
+      const r = await api("state");
+      if (direction === "pull") {
+        if (!r.state) throw new Error("نسخه ابری هنوز خالی است.");
+        const next = validateStore(r.state);
+        if (
+          !confirm(
+            "نسخه ابری جای داده‌های دستگاه را بگیرد؟ پشتیبان محلی ابتدا دانلود می‌شود.",
+          )
+        )
+          return;
+        downloadJson(snapshot, "Rooyesh-local-before-cloud.json");
+        const saved = await saveLocal(next, localRevision.current, true);
+        localRevision.current = saved.revision;
+        latest.current = next;
+        unsaved.current = false;
+        setStore(next);
+        cloudRef.current = {
+          configured: true,
+          authenticated: true,
+          active: true,
+          revision: r.revision,
+        };
+      } else {
+        validateStore(snapshot);
+        if (
+          r.state &&
+          !confirm(
+            "نسخه این دستگاه جای نسخه ابری را بگیرد؟ نسخه ابری ابتدا دانلود می‌شود.",
+          )
+        )
+          return;
+        if (r.state) downloadJson(r.state, "Rooyesh-cloud-before-replace.json");
+        const saved = await api(
+          "state",
+          { state: snapshot, revision: r.revision },
+          "PUT",
+        );
+        cloudRef.current = {
+          configured: true,
+          authenticated: true,
+          active: true,
+          revision: saved.revision,
+        };
+      }
+      setCloud(cloudRef.current);
+      setCloudStatus("synced");
+      setCloudError("");
+      notify("همگام‌سازی فعال شد. تغییرات بعدی خودکار ذخیره می‌شوند.");
+    } finally {
+      transferInProgress.current = false;
+    }
+  };
+  const exportFile = async () => {
+    if (!store) return;
+    try {
+      notify("خروجی Excel در حال آماده‌سازی است…");
+      await (
+        await import("./export")
+      ).downloadWorkbook(
+        store.projects.find((p) => p.id === store.activeProjectId)!,
+        store.settings,
+      );
+      notify("خروجی Excel آماده شد.");
+    } catch (e) {
+      notify("خروجی انجام نشد: " + (e as Error).message);
+    }
+  };
+  const backup = () => {
+    if (store) {
+      downloadJson(
+        damagedLocal.current ?? latest.current ?? store,
+        "Rooyesh-backup-" + new Date().toISOString().slice(0, 10) + ".json",
+      );
+      notify("پشتیبان همه پروژه‌ها دانلود شد.");
+    }
+  };
+  if (!store)
+    return (
+      <div className="loading-screen">
+        <div className="brand-icon">
+          <Leaf />
+        </div>
+        <h2>رویش</h2>
+        <p>فضای کاری شما در حال آماده شدن است…</p>
+      </div>
+    );
+  const project =
+    store.projects.find((p) => p.id === store.activeProjectId) ??
+    store.projects[0];
+  const updateProject = (changes: Partial<Project>) =>
+    mutate((s) => ({
+      ...s,
+      projects: s.projects.map((p) =>
+        p.id === project.id ? { ...p, ...changes } : p,
+      ),
+    }));
+  const props = {
+    project,
+    settings: store.settings,
+    onRowsChange: (key: Collection, rows: Project[Collection]) =>
+      updateProject({ [key]: rows }),
+    notify,
+  };
+  return (
+    <div className="app-shell">
+      <aside className={"sidebar " + (sidebar ? "is-open" : "")}>
+        <a
+          className="brand"
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("start");
+          }}
+        >
+          <span className="brand-icon">
+            <Leaf size={25} />
+          </span>
+          <span>
+            رویش<small>فضای کاری سئو</small>
+          </span>
+        </a>
+        <div className="sidebar-label">پروژه فعال</div>
+        <div className="project-switch">
+          <span className="project-avatar">{project.name.slice(0, 1)}</span>
+          <select
+            aria-label="پروژه فعال"
+            value={project.id}
+            onChange={(e) =>
+              mutate((s) => ({ ...s, activeProjectId: e.target.value }))
+            }
+          >
+            {store.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={14} />
+        </div>
+        <button
+          disabled={readOnly}
+          className="new-project-link"
+          onClick={() => setNewProject(true)}
+        >
+          <Plus size={15} /> پروژه جدید
+        </button>
+        <div className="sidebar-label nav-label">فضای کار</div>
+        <nav>
+          {NAV.map((n) => (
+            <button
+              key={n.key}
+              className={"nav-item " + (view === n.key ? "active" : "")}
+              onClick={() => navigate(n.key)}
+            >
+              <n.icon size={20} />
+              <span>
+                {n.label}
+                <small>{n.sub}</small>
+              </span>
+              {n.key === "keywords" && <b>{fa(project.keywords.length)}</b>}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-foot">
+          <div className="mini-tip">
+            <Sparkles size={18} />
+            <strong>هر روز، یک قدم بهتر</strong>
+            <p>
+              فقط روی قدم بعدی تمرکز کن.
+              <br />
+              بقیه مسیر اینجاست.
+            </p>
+            <button onClick={() => navigate("settings")}>
+              راهنمای استفاده <ArrowLeft size={14} />
+            </button>
+          </div>
+          <div className="storage-label">
+            <span
+              className={
+                saveStatus === "saved" ? "status-dot" : "status-dot amber"
+              }
+            />
+            {saveStatus === "saved"
+              ? "ذخیره‌شده روی این دستگاه"
+              : saveStatus === "pending"
+                ? "در حال ذخیره…"
+                : saveStatus === "error"
+                  ? "خطا در ذخیره؛ پشتیبان بگیرید"
+                  : "در حال آماده‌سازی"}
+            <ShieldCheck size={15} />
+          </div>
+        </div>
+      </aside>
+      {sidebar && (
+        <div className="sidebar-shade" onClick={() => setSidebar(false)} />
+      )}
+      <div className="main-shell">
+        <header className="topbar">
+          <div className="breadcrumb">
+            <button
+              className="icon-button mobile-menu"
+              aria-label="باز کردن منو"
+              onClick={() => setSidebar(true)}
+            >
+              <Menu />
+            </button>
+            <span>فضای کار</span>
+            <span className="crumb-sep">/</span>
+            <strong>{NAV.find((n) => n.key === view)?.label}</strong>
+          </div>
+          <div className="topbar-actions">
+            <span className="connection-state">
+              {online ? <span className="status-dot" /> : <WifiOff size={14} />}
+              <span>
+                {online
+                  ? cloudStatus === "synced"
+                    ? "همگام با ابر"
+                    : "حالت محلی"
+                  : "آفلاین · ذخیره محلی"}
+              </span>
+            </span>
+            <button
+              className="icon-button"
+              title="پشتیبان JSON همه پروژه‌ها"
+              aria-label="دانلود پشتیبان"
+              onClick={backup}
+            >
+              <ShieldCheck size={19} />
+            </button>
+            <button
+              className="btn btn-secondary export-btn"
+              onClick={exportFile}
+            >
+              <Download size={16} />
+              <span>خروجی Excel</span>
+            </button>
+            <span className="user-avatar">م</span>
+          </div>
+        </header>
+        {(readOnly || saveStatus === "error" || cloudError) && (
+          <div className="warning-banner">
+            <ShieldCheck size={17} />
+            {saveStatus === "error"
+              ? "ذخیره محلی انجام نشد. داده‌ها را پیش از بستن صفحه دانلود کنید و مشکل حافظه را بررسی کنید."
+              : readOnly
+                ? "این فضا در تب دیگری باز است. این تب فقط برای مشاهده است؛ برای ویرایش، تب دیگر را ببندید و صفحه را تازه کنید."
+                : saveStatus === "error"
+                  ? "ذخیره محلی انجام نشد. پیش از بستن صفحه پشتیبان دانلود کنید."
+                  : cloudError}
+            <button className="btn btn-ghost" onClick={backup}>
+              پشتیبان بگیر
+            </button>
+          </div>
+        )}
+        <main className="main-content">
+          {view === "start" ? (
+            <Dashboard
+              project={project}
+              store={store}
+              navigate={navigate}
+              updateProject={updateProject}
+            />
+          ) : view === "keywords" ? (
+            <fieldset disabled={readOnly} className="workspace-access">
+              <KeywordWorkspace key={project.id} {...props} />
+            </fieldset>
+          ) : view === "pages" ? (
+            <fieldset disabled={readOnly} className="workspace-access">
+              <PageWorkspace key={project.id} {...props} />
+            </fieldset>
+          ) : view === "content" ? (
+            <fieldset disabled={readOnly} className="workspace-access">
+              <ContentWorkspace key={project.id} {...props} />
+            </fieldset>
+          ) : view === "results" ? (
+            <fieldset disabled={readOnly} className="workspace-access">
+              <ResultsWorkspace key={project.id} {...props} />
+            </fieldset>
+          ) : (
+            <SettingsPanel
+              store={store}
+              project={project}
+              mutate={mutate}
+              updateProject={updateProject}
+              notify={notify}
+              backup={backup}
+              cloud={cloud}
+              setCloud={setCloud}
+              setCloudStatus={setCloudStatus}
+              clearCloudError={() => setCloudError("")}
+              transferCloud={transferCloud}
+              readOnly={readOnly}
+              replaceStore={replaceStore}
+              requestSnapshot={() => {
+                forceBackup.current = true;
+              }}
+            />
+          )}
+          <footer className="page-footer">
+            <span>رویش · از اولین کلمه تا نتیجه</span>
+            <span>داده‌ها متعلق به شماست.</span>
+          </footer>
+        </main>
+      </div>
+      {newProject && (
+        <div className="modal-backdrop">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-label="پروژه جدید"
+            className="modal project-modal"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!name.trim()) return;
+              if (store.projects.length >= 50) {
+                notify("حداکثر ۵۰ پروژه در یک فضای کاری پشتیبانی می‌شود.");
+                return;
+              }
+              const p = {
+                ...createProject(name.trim()),
+                domain: domain.trim(),
+              };
+              mutate((s) => ({
+                ...s,
+                activeProjectId: p.id,
+                projects: [...s.projects, p],
+              }));
+              setNewProject(false);
+              setName("");
+              setDomain("");
+              navigate("start");
+              notify("پروژه جدید آماده است. از اولین کلمه شروع کنید.");
+            }}
+          >
+            <button
+              type="button"
+              className="icon-button modal-close"
+              aria-label="بستن"
+              onClick={() => setNewProject(false)}
+            >
+              <X />
+            </button>
+            <div className="modal-symbol">
+              <FolderPlus size={28} />
+            </div>
+            <h2>یک شروع تازه</h2>
+            <p className="muted">
+              هر پروژه، داده‌ها و مسیر مستقل خودش را دارد.
+            </p>
+            <label className="field">
+              نام پروژه
+              <input
+                autoFocus
+                required
+                maxLength={100}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="مثلاً فروشگاه من"
+              />
+            </label>
+            <label className="field">
+              دامنه
+              <input
+                dir="ltr"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                placeholder="example.com"
+              />
+            </label>
+            <button className="btn btn-primary full-width" type="submit">
+              ساخت پروژه <ArrowLeft size={17} />
+            </button>
+          </form>
+        </div>
+      )}
+      {toast && (
+        <div className="toast" role="status">
+          <CheckCircle2 size={19} />
+          {toast}
+          <button aria-label="بستن پیام" onClick={() => setToast("")}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Dashboard({
+  project,
+  store,
+  navigate,
+  updateProject,
+}: {
+  project: Project;
+  store: Store;
+  navigate: (v: View) => void;
+  updateProject: (p: Partial<Project>) => void;
+}) {
+  const summary = useMemo(
+    () => summarize(project, store.settings),
+    [project, store.settings],
+  );
+  const keywordMap = useMemo(
+    () => keywordLookup(project.keywords),
+    [project.keywords],
+  );
+  const duplicateMap = useMemo(
+    () => duplicates(project.keywords),
+    [project.keywords],
+  );
+  const resultMap = useMemo(
+    () => resultLookup(project.results, project.pages),
+    [project.results, project.pages],
+  );
+  const pageAction = (row: Row) => {
+    const key = normalizeKeyword(String(row.pkw ?? ""));
+    if (
+      row.status !== "Complete" &&
+      row.action !== "No Dedicated Page" &&
+      (duplicateMap.get(key) ?? 0) > 1
+    )
+      return "کلمه اصلی تکراری است؛ داده‌ها را بازبینی کنید";
+    return nextPage(
+      row,
+      store.settings,
+      keywordMap.get(key),
+      resultMap.get(row.id),
+    );
+  };
+  const targets = [
+    "keywords",
+    "pages",
+    "pages",
+    "content",
+    "results",
+  ] as View[];
+  const stage = Math.max(1, Math.min(5, summary.stage));
+  const current = targets[stage - 1];
+  const stats = [
+    {
+      label: "کلمات کلیدی",
+      value: project.keywords.length,
+      detail: fa(summary.totals.reviewed) + " کلمه بررسی‌شده",
+      icon: Search,
+      color: "mint",
+    },
+    {
+      label: "صفحات هدف",
+      value: project.pages.length,
+      detail: fa(summary.totals.ready) + " صفحه آماده اجرا",
+      icon: Layers3,
+      color: "violet",
+    },
+    {
+      label: "منتشرشده",
+      value: summary.totals.published,
+      detail: "از ایده تا صفحه واقعی",
+      icon: CheckCircle2,
+      color: "blue",
+    },
+    {
+      label: "در حال پایش",
+      value: summary.totals.monitored,
+      detail: "اندازه‌گیری و بهبود مستمر",
+      icon: TrendingUp,
+      color: "amber",
+    },
+  ];
+  const tasks = [
+    ...project.pages
+      .filter((r) => r.action !== "No Dedicated Page")
+      .filter((r) => pageAction(r) !== "تکمیل شده")
+      .slice(0, 3)
+      .map((r) => ({
+        id: r.id,
+        title: String(r.target || r.pkw || "صفحه بدون نام"),
+        label: pageAction(r),
+        priority: String(r.priority || "P2"),
+        view: "pages" as View,
+      })),
+    ...project.keywords
+      .filter(
+        (r) =>
+          r.decision !== "Exclude" && nextKeyword(r) !== "آماده هدف‌گذاری صفحه",
+      )
+      .slice(0, 2)
+      .map((r) => ({
+        id: r.id,
+        title: String(r.keyword),
+        label: nextKeyword(r),
+        priority: "کلمه",
+        view: "keywords" as View,
+      })),
+  ].slice(0, 4);
+  return (
+    <>
+      <div className="workspace-heading dashboard-heading">
+        <div>
+          <div className="eyebrow">
+            <span className="status-dot" /> {project.name}{" "}
+            <span className="subtle-divider">/</span>{" "}
+            <span dir="ltr">
+              {project.domain || "دامنه را در تنظیمات وارد کنید"}
+            </span>
+          </div>
+          <h1>
+            هر قدم، یک فرصت رشد<span className="heading-dot">.</span>
+          </h1>
+          <p>دید روشن به پروژه، تمرکز روی کاری که حالا مهم است.</p>
+        </div>
+        <div className="today">
+          <span>{dateLabel()}</span>
+          <button
+            className="btn btn-ghost"
+            onClick={() => {
+              updateProject({
+                lastReview: new Date().toISOString().slice(0, 10),
+              });
+            }}
+          >
+            ثبت مرور امروز <Check size={14} />
+          </button>
+        </div>
+      </div>
+      <section className="hero-card">
+        <div className="hero-copy">
+          <span className="hero-pill">
+            <Sparkles size={14} /> قدم {fa(stage)} از ۵ · {summary.stageTitle}
+          </span>
+          <h2>{summary.action}</h2>
+          <p>
+            با یک تصمیم درست شروع کن. فیلدهای پیشرفته وقتی نیازشان داری در کنار
+            تو هستند.
+          </p>
+          <button className="btn btn-primary" onClick={() => navigate(current)}>
+            ادامه مسیر <ArrowUpLeft size={18} />
+          </button>
+          <small>
+            قدم بعد: {summary.nextStage || "اندازه‌گیری و بهبود مستمر"}
+          </small>
+        </div>
+        <div className="hero-art" aria-hidden="true">
+          <div className="art-halo" />
+          <div className="art-line line-one" />
+          <div className="art-line line-two" />
+          <div className="art-card art-keyword">
+            <span className="art-icon">
+              <Search size={19} />
+            </span>
+            <span>
+              فرصت تازه<small>کلمات هدفمند</small>
+            </span>
+            <CheckCircle2 size={16} />
+          </div>
+          <div className="art-card art-growth">
+            <span className="mini-bars">
+              <i />
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            <span>
+              رشد پایدار<small>از برنامه تا نتیجه</small>
+            </span>
+            <TrendingUp size={19} />
+          </div>
+          <span className="art-spark spark-one">✦</span>
+          <span className="art-spark spark-two">✦</span>
+          <div className="art-circle">
+            <Leaf size={43} />
+          </div>
+        </div>
+      </section>
+      <section className="stats-grid">
+        {stats.map((s) => (
+          <button
+            className="stat-card"
+            key={s.label}
+            onClick={() =>
+              navigate(
+                s.label === "کلمات کلیدی"
+                  ? "keywords"
+                  : s.label === "در حال پایش"
+                    ? "results"
+                    : "pages",
+              )
+            }
+          >
+            <div>
+              <span className="stat-label">{s.label}</span>
+              <strong>{fa(s.value)}</strong>
+              <small>{s.detail}</small>
+            </div>
+            <span className={"stat-icon " + s.color}>
+              <s.icon size={21} />
+            </span>
+          </button>
+        ))}
+      </section>
+      <section className="journey-card">
+        <div className="section-title">
+          <div>
+            <h3>مسیر پروژه</h3>
+            <p>همه چیز سر جای خودش؛ از تحقیق تا بهبود.</p>
+          </div>
+          <span className="badge green">مرحله {fa(stage)} از ۵</span>
+        </div>
+        <div className="journey-steps">
+          {[
+            "تحقیق کلمات",
+            "نقشه صفحات",
+            "سئوی صفحه",
+            "اجرا و انتشار",
+            "نتایج و بهبود",
+          ].map((s, i) => (
+            <button
+              className={
+                "journey-step " +
+                (i + 1 === stage ? "current" : i + 1 < stage ? "done" : "")
+              }
+              key={s}
+              onClick={() => navigate(targets[i])}
+            >
+              <span>{i + 1 < stage ? <Check size={16} /> : fa(i + 1)}</span>
+              <strong>{s}</strong>
+              <small>
+                {
+                  [
+                    "کشف · تحلیل · گروه‌بندی",
+                    "صفحه · PKW · نیت جستجو",
+                    "عنوان · ساختار · لینک",
+                    "محتوا · بررسی · انتشار",
+                    "پایش · یادگیری · بهینه‌سازی",
+                  ][i]
+                }
+              </small>
+            </button>
+          ))}
+        </div>
+      </section>
+      <div className="dashboard-bottom">
+        <section className="focus-card">
+          <div className="section-title">
+            <div>
+              <h3>روی این‌ها تمرکز کن</h3>
+              <p>قدم‌های باز پروژه، بدون شلوغی.</p>
+            </div>
+            <span className="focus-icon">
+              <Target size={20} />
+            </span>
+          </div>
+          {tasks.length ? (
+            tasks.map((t) => (
+              <button
+                className="task-row"
+                key={t.id}
+                onClick={() => navigate(t.view)}
+              >
+                <span
+                  className={
+                    "priority-tag " + (t.priority === "P0" ? "p0" : "")
+                  }
+                >
+                  {t.priority}
+                </span>
+                <span>
+                  <strong>{t.title}</strong>
+                  <small>{t.label}</small>
+                </span>
+                <ArrowUpLeft size={18} />
+              </button>
+            ))
+          ) : (
+            <div className="empty-focus">
+              <CheckCircle2 />
+              <p>فضا برای شروع آماده است.</p>
+              <button
+                className="btn btn-secondary"
+                onClick={() => navigate("keywords")}
+              >
+                اولین کلمه را اضافه کن
+              </button>
+            </div>
+          )}
+        </section>
+        <section className="health-card">
+          <div className="section-title">
+            <div>
+              <h3>پروژه در یک نگاه</h3>
+              <p>فقط داده‌های واقعی همین پروژه</p>
+            </div>
+            <Globe2 size={20} />
+          </div>
+          {[
+            ["نوع پروژه", project.projectType],
+            ["زبان / بازار", project.language + " / " + project.market],
+            ["شروع پروژه", project.startDate || "ثبت نشده"],
+            ["آخرین مرور", project.lastReview || "هنوز مرور نشده"],
+          ].map(([l, v]) => (
+            <div className="info-row" key={l}>
+              <span>{l}</span>
+              <strong>{v}</strong>
+            </div>
+          ))}
+          <div className="goal-note">
+            <span>هدف سئو</span>
+            <p>{project.goal || "هدفت را در تنظیمات پروژه ثبت کن."}</p>
+          </div>
+          <button className="text-button" onClick={() => navigate("settings")}>
+            تنظیمات پروژه <ArrowLeft size={15} />
+          </button>
+        </section>
+      </div>
+      <div className="demo-notice">
+        <BookOpen size={18} />
+        <span>
+          پروژه اولیه چند ردیف نمونه دارد؛ می‌توانی آن‌ها را ویرایش کنی یا از
+          تنظیمات پاک کنی. پروژه جدید کاملاً خالی ساخته می‌شود.
+        </span>
+      </div>
+    </>
+  );
+}
+
+function SettingsPanel({
+  store,
+  project,
+  mutate,
+  updateProject,
+  notify,
+  backup,
+  cloud,
+  setCloud,
+  setCloudStatus,
+  clearCloudError,
+  transferCloud,
+  readOnly,
+  replaceStore,
+  requestSnapshot,
+}: {
+  store: Store;
+  project: Project;
+  mutate: (fn: (s: Store) => Store) => void;
+  updateProject: (p: Partial<Project>) => void;
+  notify: (s: string) => void;
+  backup: () => void;
+  cloud: {
+    configured: boolean;
+    authenticated: boolean;
+    active: boolean;
+    revision: number;
+  };
+  setCloud: React.Dispatch<
+    React.SetStateAction<{
+      configured: boolean;
+      authenticated: boolean;
+      active: boolean;
+      revision: number;
+    }>
+  >;
+  setCloudStatus: (s: string) => void;
+  clearCloudError: () => void;
+  transferCloud: (direction: "pull" | "push") => Promise<void>;
+  readOnly: boolean;
+  replaceStore: (state: Store) => Promise<void>;
+  requestSnapshot: () => void;
+}) {
+  const [tab, setTab] = useState("project");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [snapshots, setSnapshots] = useState<Stored[]>([]);
+  const [guideSearch, setGuideSearch] = useState("");
+  const [remote, setRemote] = useState<{
+    state: Store | null;
+    revision: number;
+  } | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    listBackups()
+      .then(setSnapshots)
+      .catch(() => {});
+  }, [tab]);
+  const restore = async (file: File) => {
+    try {
+      const next = validateStore(JSON.parse(await file.text()));
+      if (
+        !confirm(
+          "پشتیبان معتبر است و " +
+            next.projects.length +
+            " پروژه دارد. داده‌های فعلی با این نسخه جایگزین شوند؟ ابتدا پشتیبان فعلی به‌صورت خودکار دانلود می‌شود.",
+        )
+      )
+        return;
+      backup();
+      requestSnapshot();
+      await replaceStore(next);
+      notify("پشتیبان بازیابی شد.");
+    } catch (e) {
+      notify("فایل بازیابی نشد: " + (e as Error).message);
+    }
+  };
+  const connect = async () => {
+    setBusy(true);
+    try {
+      await api("login", { password });
+      setPassword("");
+      const r = await api("state");
+      setRemote(r);
+      setCloud((c) => ({ ...c, authenticated: true, revision: r.revision }));
+      notify("ورود انجام شد. جهت همگام‌سازی را انتخاب کنید.");
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cloudOperation = async (direction: "pull" | "push") => {
+    setBusy(true);
+    try {
+      await transferCloud(direction);
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const guide = Object.entries(SCHEMAS)
+    .flatMap(([collection, sections]) =>
+      sections.flatMap((s) =>
+        s.fields.map((f) => ({ ...f, collection, section: s.label })),
+      ),
+    )
+    .filter((f) =>
+      (f.label + " " + f.key + " " + f.hint).includes(guideSearch),
+    );
+  return (
+    <>
+      <div className="workspace-heading">
+        <div>
+          <div className="eyebrow">کنترل پروژه</div>
+          <h1>همه چیز، طبق نیاز شما</h1>
+          <p>تنظیمات، امنیت داده‌ها و راهنمای مسیر سئو.</p>
+        </div>
+        <span className="workspace-symbol">
+          <Settings2 />
+        </span>
+      </div>
+      <div className="settings-tabs">
+        {[
+          ["project", "پروژه و تنظیمات"],
+          ["backup", "پشتیبان و فضای ابری"],
+          ["guide", "راهنمای فیلدها"],
+        ].map(([k, v]) => (
+          <button
+            className={tab === k ? "active" : ""}
+            key={k}
+            onClick={() => setTab(k)}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+      {tab === "project" ? (
+        <>
+          <section className="settings-card">
+            <h3>هویت پروژه</h3>
+            <p className="muted">
+              این اطلاعات فقط برای پروژه «{project.name}» است.
+            </p>
+            <div className="form-grid">
+              {[
+                ["name", "نام پروژه"],
+                ["domain", "دامنه"],
+                ["market", "بازار"],
+                ["language", "زبان"],
+                ["goal", "هدف سئو"],
+                ["startDate", "تاریخ شروع"],
+                ["lastReview", "آخرین مرور"],
+              ].map(([k, l]) => (
+                <label className="field" key={k}>
+                  {l}
+                  <input
+                    disabled={readOnly}
+                    type={
+                      k.toLowerCase().includes("date") || k === "lastReview"
+                        ? "date"
+                        : "text"
+                    }
+                    value={String(project[k as keyof Project] ?? "")}
+                    maxLength={10000}
+                    onChange={(e) => {
+                      if (k === "name" && !e.target.value.trim()) return;
+                      updateProject({ [k]: e.target.value });
+                    }}
+                  />
+                </label>
+              ))}
+              <label className="field">
+                نوع پروژه
+                <select
+                  disabled={readOnly}
+                  value={project.projectType}
+                  onChange={(e) =>
+                    updateProject({ projectType: e.target.value })
+                  }
+                >
+                  {LISTS.projectType.map((o) => (
+                    <option key={o}>{o}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </section>
+          <section className="settings-card">
+            <h3>سیگنال‌های بررسی عنوان و متا</h3>
+            <p className="muted">
+              طول، فقط یادآور بازبینی است؛ امتیاز یا تضمین رتبه نیست.
+            </p>
+            <div className="form-grid thresholds">
+              {[
+                ["titleMin", "حداقل طول عنوان"],
+                ["titleMax", "حداکثر طول عنوان"],
+                ["metaMin", "حداقل طول متا"],
+                ["metaMax", "حداکثر طول متا"],
+              ].map(([k, l]) => (
+                <label className="field" key={k}>
+                  {l}
+                  <input
+                    type="number"
+                    min={0}
+                    max={1000}
+                    value={
+                      store.settings[k as keyof typeof store.settings] as number
+                    }
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (Number.isFinite(n) && n >= 0 && n <= 1000)
+                        mutate((s) => {
+                          const settings = { ...s.settings, [k]: n };
+                          if (k === "titleMin" && n > settings.titleMax)
+                            settings.titleMax = n;
+                          if (k === "titleMax" && n < settings.titleMin)
+                            settings.titleMin = n;
+                          if (k === "metaMin" && n > settings.metaMax)
+                            settings.metaMax = n;
+                          if (k === "metaMax" && n < settings.metaMin)
+                            settings.metaMin = n;
+                          return { ...s, settings };
+                        });
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+            {(store.settings.titleMin > store.settings.titleMax ||
+              store.settings.metaMin > store.settings.metaMax) && (
+              <p className="validation-message">
+                حداقل باید کوچک‌تر یا برابر حداکثر باشد.
+              </p>
+            )}
+          </section>
+          <section className="settings-card">
+            <h3>فیلدهای اختصاصی</h3>
+            <p className="muted">
+              نام را تغییر بده؛ هویت داده‌های قبلی ثابت می‌ماند.
+            </p>
+            <div className="form-grid">
+              {Array.from(
+                { length: 10 },
+                (_, i) => "custom" + String(i + 1).padStart(2, "0"),
+              ).map((k, i) => (
+                <label className="field" key={k}>
+                  فیلد {fa(i + 1)}
+                  <input
+                    maxLength={100}
+                    placeholder={"Custom " + String(i + 1).padStart(2, "0")}
+                    value={store.settings.customLabels?.[k] ?? ""}
+                    onChange={(e) =>
+                      mutate((s) => ({
+                        ...s,
+                        settings: {
+                          ...s.settings,
+                          customLabels: {
+                            ...s.settings.customLabels,
+                            [k]: e.target.value,
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+          </section>
+          <section className="settings-card danger-zone">
+            <h3>مدیریت داده‌های پروژه</h3>
+            <p className="muted">
+              پیش از حذف، یک نسخه پشتیبان دانلود می‌شود. سایر پروژه‌ها حفظ
+              می‌شوند.
+            </p>
+            <div className="action-row">
+              <button
+                disabled={readOnly}
+                className="btn btn-secondary"
+                onClick={() => {
+                  if (
+                    confirm(
+                      "همه کلمات، صفحات، محتوا و نتایج این پروژه پاک شوند؟",
+                    )
+                  ) {
+                    backup();
+                    updateProject({
+                      keywords: [],
+                      pages: [],
+                      content: [],
+                      results: [],
+                    });
+                    notify(
+                      "داده‌های پروژه پاک شدند؛ پشتیبان برای بازیابی در اختیار شماست.",
+                    );
+                  }
+                }}
+              >
+                پاک‌سازی داده‌های این پروژه
+              </button>
+              {store.projects.length > 1 && (
+                <button
+                  disabled={readOnly}
+                  className="btn btn-danger"
+                  onClick={() => {
+                    if (
+                      confirm(
+                        "پروژه «" +
+                          project.name +
+                          "» با همه داده‌هایش حذف شود؟",
+                      )
+                    ) {
+                      backup();
+                      mutate((s) => {
+                        const projects = s.projects.filter(
+                          (p) => p.id !== project.id,
+                        );
+                        return {
+                          ...s,
+                          projects,
+                          activeProjectId: projects[0].id,
+                        };
+                      });
+                      notify("پروژه حذف شد.");
+                    }
+                  }}
+                >
+                  حذف پروژه
+                </button>
+              )}
+            </div>
+          </section>
+        </>
+      ) : tab === "backup" ? (
+        <>
+          <section className="settings-card">
+            <div className="section-title">
+              <div>
+                <h3>داده‌های شما، همیشه در اختیار شما</h3>
+                <p>
+                  پشتیبان JSON همه داده‌ها و تنظیمات را حفظ می‌کند؛ Excel برای
+                  خروجی قابل اشتراک است.
+                </p>
+              </div>
+              <ShieldCheck size={26} />
+            </div>
+            <div className="action-row">
+              <button className="btn btn-primary" onClick={backup}>
+                <Download size={16} /> دانلود پشتیبان کامل
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => input.current?.click()}
+              >
+                <Upload size={16} /> بازیابی پشتیبان
+              </button>
+              <input
+                hidden
+                ref={input}
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void restore(f);
+                  e.target.value = "";
+                }}
+              />
+            </div>
+            <div className="offline-explainer">
+              <WifiOff size={20} />
+              <div>
+                <strong>حتی وقتی اینترنت قطع می‌شود</strong>
+                <p>
+                  اطلاعات در IndexedDB دستگاه ذخیره می‌شود. نسخه انتشار‌یافته پس
+                  از اولین بارگذاری کامل، آفلاین باز می‌شود. پاک‌کردن داده
+                  مرورگر ممکن است نسخه محلی را حذف کند؛ پشتیبان را خارج از این
+                  دستگاه نگه دارید.
+                </p>
+              </div>
+            </div>
+          </section>
+          <section className="settings-card">
+            <h3>نسخه‌های محلی پیشین</h3>
+            <p className="muted">
+              تا ۸ نسخه اخیر همین دستگاه؛ جایگزین پشتیبان دانلودی نیست.
+            </p>
+            {snapshots.length ? (
+              snapshots.map((s) => (
+                <div className="snapshot-row" key={s.savedAt}>
+                  <span>
+                    {new Intl.DateTimeFormat("fa-IR", {
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    }).format(new Date(s.savedAt))}
+                  </span>
+                  <span>{fa(s.state.projects.length)} پروژه</span>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={async () => {
+                      if (
+                        confirm(
+                          "این نسخه جایگزین داده‌های فعلی شود؟ پشتیبان فعلی دانلود می‌شود.",
+                        )
+                      ) {
+                        backup();
+                        requestSnapshot();
+                        try {
+                          await replaceStore(validateStore(s.state));
+                          notify("نسخه محلی بازیابی شد.");
+                        } catch (e) {
+                          notify((e as Error).message);
+                        }
+                      }
+                    }}
+                  >
+                    بازیابی
+                  </button>
+                </div>
+              ))
+            ) : (
+              <p className="muted">
+                نسخه‌های پیشین با ادامه کار به‌صورت خودکار ثبت می‌شوند.
+              </p>
+            )}
+          </section>
+          <section className="settings-card cloud-card">
+            <div className="section-title">
+              <div>
+                <h3>همراه شما، روی دستگاه‌های دیگر</h3>
+                <p>
+                  همگام‌سازی روی Cloudflare D1، با ورود محافظت‌شده و کنترل
+                  اختلاف نسخه‌ها.
+                </p>
+              </div>
+              <Cloud size={26} />
+            </div>
+            {!cloud.configured ? (
+              <div className="cloud-empty">
+                <span className="badge amber">ذخیره محلی فعال است</span>
+                <p>
+                  فضای ابری در این اجرا پیکربندی نشده است. راهنمای README پروژه
+                  مراحل اتصال D1 و رمز ورود را دارد. رمز در سورس یا مرورگر ذخیره
+                  نمی‌شود.
+                </p>
+              </div>
+            ) : !cloud.authenticated ? (
+              <form
+                className="cloud-login"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void connect();
+                }}
+              >
+                <label className="field">
+                  رمز فضای ابری
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </label>
+                <button disabled={busy} className="btn btn-primary">
+                  {busy ? "در حال اتصال…" : "اتصال به فضای ابری"}
+                </button>
+              </form>
+            ) : (
+              <>
+                <span className={"badge " + (cloud.active ? "green" : "amber")}>
+                  {cloud.active
+                    ? "همگام‌سازی خودکار فعال"
+                    : "وارد شده‌اید · جهت انتقال را انتخاب کنید"}
+                </span>
+                <p className="muted">
+                  انتقال اولیه با انتخاب شما انجام می‌شود. اطلاعات متفاوت بدون
+                  تأیید جایگزین نمی‌شوند.
+                </p>
+                <div className="action-row">
+                  <button
+                    disabled={busy || readOnly}
+                    className="btn btn-secondary"
+                    onClick={() => void cloudOperation("pull")}
+                  >
+                    <Download size={16} /> دریافت نسخه ابری
+                  </button>
+                  <button
+                    disabled={busy || readOnly}
+                    className="btn btn-primary"
+                    onClick={() => void cloudOperation("push")}
+                  >
+                    <Upload size={16} /> ارسال نسخه این دستگاه
+                  </button>
+                  <button
+                    disabled={busy}
+                    className="btn btn-ghost"
+                    onClick={async () => {
+                      try {
+                        await api("logout", {});
+                        setCloud((c) => ({
+                          ...c,
+                          authenticated: false,
+                          active: false,
+                        }));
+                        setCloudStatus("local");
+                        notify(
+                          "از فضای ابری خارج شدید؛ داده‌های دستگاه باقی ماند.",
+                        );
+                      } catch (e) {
+                        notify((e as Error).message);
+                      }
+                    }}
+                  >
+                    خروج
+                  </button>
+                </div>
+                {remote?.state && (
+                  <p className="muted">
+                    نسخه ابری دارای {fa(remote.state.projects.length)} پروژه
+                    است.
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+        </>
+      ) : (
+        <>
+          <section className="settings-card stage-guide">
+            <h3>از کجا شروع کنم؟</h3>
+            {[
+              [
+                "۱ · تحقیق کلمات",
+                "کلمه، حجم، سختی، نیت، تصمیم و گروه را ثبت کن. عنوان و H1 را بعداً بررسی کن.",
+              ],
+              [
+                "۲ · نقشه صفحات",
+                "هر صفحه یک ردیف. PKW را با قضاوت انسانی انتخاب کن؛ SERP تعیین می‌کند کلمات روی یک صفحه باشند یا جدا.",
+              ],
+              [
+                "۳ · سئوی صفحه",
+                "در پنل صفحه، بخش عنوان/H1/متا و بریف را باز کن. H1 و Title لازم نیست یکسان باشند.",
+              ],
+              [
+                "۴ · اجرا",
+                "محتوا را تولید کن، لینک داخلی و بررسی فنی را انجام بده و تاریخ انتشار ثبت کن.",
+              ],
+              [
+                "۵ · نتایج",
+                "داده واقعی Search Console و فروش را وارد کن؛ بازه‌های برابر را مقایسه و اقدام بعدی را مشخص کن.",
+              ],
+            ].map(([t, d]) => (
+              <div className="guide-step" key={t}>
+                <strong>{t}</strong>
+                <p>{d}</p>
+              </div>
+            ))}
+          </section>
+          <section className="settings-card">
+            <h3>فرهنگ فیلدها</h3>
+            <p className="muted">
+              عدد صفر با مقدار خالی متفاوت است. فیلدهای محاسباتی قابل ویرایش
+              نیستند؛ انتخاب‌های سئو همیشه انسانی‌اند.
+            </p>
+            <input
+              className="search-input guide-search"
+              placeholder="جستجوی نام یا کاربرد فیلد…"
+              value={guideSearch}
+              onChange={(e) => setGuideSearch(e.target.value)}
+            />
+            <div className="field-guide-grid">
+              {guide.map((f, i) => (
+                <div
+                  className="field-guide-item"
+                  key={f.collection + f.key + i}
+                >
+                  <span className="badge gray">{f.section}</span>
+                  <h4>{f.label}</h4>
+                  <p>
+                    {f.hint ||
+                      (
+                        {
+                          pkw: "کلمه اصلی هدف صفحه؛ پس از گروه‌بندی و بررسی نتایج جستجو انتخاب می‌شود.",
+                          volume:
+                            "تخمین تعداد جستجو در بازه ابزار؛ تضمین ترافیک نیست.",
+                          pillar:
+                            "موضوع مادر برای سازمان‌دهی محتوا و لینک داخلی.",
+                          cluster: "خوشه موضوعی؛ صرف شباهت کلمات کافی نیست.",
+                          position:
+                            "میانگین جایگاه در Search Console؛ عدد کوچک‌تر معمولاً بهتر است.",
+                          proposedTitle:
+                            "عنوان پیشنهادی برای نتیجه جستجو؛ می‌تواند با H1 متفاوت باشد.",
+                        } as Record<string, string>
+                      )[f.key] ||
+                      "در بخش «" +
+                        f.section +
+                        "» استفاده می‌شود. " +
+                        (f.calculated
+                          ? "از داده‌های همین رکورد محاسبه می‌شود."
+                          : f.options
+                            ? "یک گزینه از فهرست انتخاب کنید."
+                            : "داده واقعی این مورد را وارد کنید؛ در صورت نامشخص بودن خالی بگذارید.")}
+                  </p>
+                  {f.options && <small>{f.options.join(" · ")}</small>}
+                </div>
+              ))}
+            </div>
+          </section>
+          <section className="settings-card">
+            <h3>فهرست‌های استاندارد</h3>
+            <p className="muted">
+              این گزینه‌ها در همه پروژه‌ها یکسان‌اند تا واردکردن و خروجی پایدار
+              بماند.
+            </p>
+            {Object.entries(LISTS).map(([key, values]) => (
+              <details className="section-accordion" key={key}>
+                <summary>
+                  {key} <ChevronDown size={14} />
+                </summary>
+                <div className="canonical-list">
+                  {values.map((v: string) => (
+                    <span className="badge gray" key={v}>
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              </details>
+            ))}
+          </section>
+        </>
+      )}
+    </>
+  );
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+artifacts/
+playwright-report/
+test-results/
+*.log
+
+*.tsbuildinfo
+.rooyesh-install/
+.rooyesh-source-ref

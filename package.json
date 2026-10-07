@@ -1,0 +1,41 @@
+{
+  "name": "seo-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build && node scripts/build-sw.mjs",
+    "test": "vitest run",
+    "preview": "vite preview --host 0.0.0.0",
+    "cloud:dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "test:browser": "node scripts/browser-check.mjs",
+    "test:performance": "node scripts/performance-check.mjs",
+    "test:cloud-browser": "node scripts/cloud-browser-check.mjs",
+    "setup:cloudflare": "node scripts/install-cloudflare.mjs",
+    "test:installer": "node --test scripts/install-cloudflare-check.mjs",
+    "workbook": "vite-node scripts/generate-workbook.ts"
+  },
+  "dependencies": {
+    "@fontsource/vazirmatn": "^5.3.0",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "playwright": "^1.55.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.0",
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
