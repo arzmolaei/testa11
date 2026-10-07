@@ -185,7 +185,7 @@ try {
   await page.locator("#field-content-targetPage").selectOption(pageId);
   await page.locator("#field-content-topic").fill("راهنمای انتخاب دوربین");
   await page.locator("#field-content-contentType").selectOption("Buying Guide");
-  await page.locator("#field-content-publishDate").fill("2026-10-12");
+  await page.locator("#field-content-publishDate").fill("۱۴۰۵/۰۷/۲۰");
   await page.getByRole("button", { name: "ذخیره محتوا", exact: true }).click();
   await saved((s) => active(s).content.length === 1);
   await page.getByRole("button", { name: "تقویم", exact: true }).click();
@@ -197,7 +197,7 @@ try {
     .first()
     .click();
   await page.locator("#field-results-pageId").selectOption(pageId);
-  await page.locator("#field-results-baselineDate").fill("2026-10-01");
+  await page.locator("#field-results-baselineDate").fill("۱۴۰۵/۰۷/۰۹");
   await page.locator("#field-results-clicks").fill("10");
   await page.locator("#field-results-impressions").fill("100");
   await page.locator("#field-results-ctr").fill("10");

@@ -16,12 +16,17 @@ import {
   Home,
   Layers3,
   Leaf,
+  LogOut,
   Menu,
+  Moon,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Sun,
+  Table2,
   Target,
   TrendingUp,
   Upload,
@@ -52,16 +57,25 @@ import {
 } from "./storage";
 import type { Stored } from "./storage";
 import { KeywordWorkspace } from "./components/KeywordWorkspace";
+import { BulkEditWorkspace } from "./components/BulkEditWorkspace";
+import { AuthGate } from "./components/AuthGate";
+import { TeamSettings } from "./components/TeamSettings";
+import type { AuthActions, AuthSession } from "./auth";
+import { useTheme } from "./theme";
+import { formatDate, todayIso, jalaliFileDate } from "./dates";
+import { JalaliDateInput } from "./components/JalaliDateInput";
+import { cloudResumeDecision, fingerprintStore, readCloudLink, rememberCloudLink, forgetCloudLink } from "./cloud-link";
 import {
   PageWorkspace,
   ContentWorkspace,
   ResultsWorkspace,
 } from "./components/PageWorkspaces";
 
-type View = "start" | Collection | "settings";
+type View = "start" | Collection | "settings" | "bulk";
 const NAV = [
   { key: "start", label: "نمای کلی", sub: "مسیر و قدم بعدی", icon: Home },
   { key: "keywords", label: "کلمات کلیدی", sub: "کشف و تصمیم", icon: Search },
+  { key: "bulk", label: "تغییر گروهی", sub: "ویرایش سریع و پیشنهاد گروه‌بندی", icon: Table2 },
   { key: "pages", label: "نقشه صفحات", sub: "هدف‌گذاری و سئو", icon: Layers3 },
   {
     key: "content",
@@ -84,12 +98,12 @@ const NAV = [
 ] as const;
 const fa = (n: number) => new Intl.NumberFormat("fa-IR").format(n);
 const dateLabel = () =>
-  new Intl.DateTimeFormat("fa-IR", {
+  formatDate(new Date().toISOString(), {
     day: "numeric",
     month: "long",
     year: "numeric",
     timeZone: "Asia/Tehran",
-  }).format(new Date());
+  });
 async function api(path: string, body?: unknown, method?: string) {
   const r = await fetch("/api/" + path, {
     signal: AbortSignal.timeout(20000),
@@ -104,22 +118,40 @@ async function api(path: string, body?: unknown, method?: string) {
     throw new Error("سرویس ابری در این اجرا در دسترس نیست.");
   }
   if (!r.ok) {
+    if (r.status === 401) window.dispatchEvent(new Event("seo:auth-expired"));
     throw new Error(
       r.status === 409
         ? "نسخه ابری تغییر کرده؛ همگام‌سازی متوقف شد. ابتدا نسخه ابری را دریافت کنید."
-        : (payload.error ?? "ارتباط با ابر انجام نشد."),
+        : ({ FORBIDDEN: "حساب شما اجازهٔ این تغییر را ندارد.", AUTH_REQUIRED: "برای ادامه دوباره وارد شوید.", TEAM_MIGRATION_REQUIRED: "نسخهٔ جدید دیتابیس باید با نصب‌کننده آماده شود.", TOO_MANY_ATTEMPTS: "تلاش‌های ورود زیاد است؛ کمی بعد دوباره امتحان کنید." } as Record<string, string>)[payload.error] ?? payload.error ?? "ارتباط با ابر انجام نشد.",
     );
   }
   return payload;
 }
 
 export default function App() {
+  return <AuthGate>{(session, auth) => <WorkspaceApp key={session.user.id} session={session} auth={auth} />}</AuthGate>;
+}
+
+function initialWorkspace(localMode: boolean): Store {
+  if (localMode) return demoStore();
+  const project = createProject("پروژه سئو");
+  return { version: 1, activeProjectId: project.id, projects: [project], settings: { titleMin: 30, titleMax: 60, metaMin: 100, metaMax: 160 } };
+}
+
+function hasDraft(): boolean {
+  return Boolean(document.querySelector('[data-unsaved="true"], [data-dirty="true"]'));
+}
+
+function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActions }) {
+  const { theme, toggleTheme } = useTheme();
+  const viewer = session.user.role === "viewer";
   const [store, setStore] = useState<Store | null>(null);
   const [view, setView] = useState<View>("start");
   const [toast, setToast] = useState("");
   const [saveStatus, setSaveStatus] = useState("loading");
-  const [online, setOnline] = useState(navigator.onLine);
+  const [online, setOnline] = useState(session.mode === "offline" || session.networkOnline === false ? false : navigator.onLine);
   const [sidebar, setSidebar] = useState(false);
+  const [updateReady, setUpdateReady] = useState(false);
   const [newProject, setNewProject] = useState(false);
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("");
@@ -161,18 +193,32 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(""), 5000);
   }, []);
   useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const announce = () => setUpdateReady(true);
+    window.addEventListener("seo:update-ready", announce);
+    void navigator.serviceWorker.getRegistration().then((registration) => {
+      if (registration?.waiting) announce();
+    }).catch(() => {});
+    return () => window.removeEventListener("seo:update-ready", announce);
+  }, []);
+  useEffect(() => {
     cloudRef.current = cloud;
   }, [cloud]);
   useEffect(() => {
     onlineRef.current = online;
   }, [online]);
   useEffect(() => {
+    if (session.mode === "offline" || session.networkOnline === false) setOnline(false);
+    else if (session.mode === "online" || session.networkOnline === true) setOnline(true);
+  }, [session.mode, session.networkOnline]);
+  useEffect(() => {
     let mounted = true;
-    loadLocal()
-      .then((local) => {
+    const prepare = async () => {
+      try {
+        const local = await loadLocal();
         if (!mounted) return;
         damagedLocal.current = local;
-        const state = local ? validateStore(local.state) : demoStore();
+        let state = local ? validateStore(local.state) : initialWorkspace(session.mode === "local");
         if (
           local &&
           (!Number.isSafeInteger(local.revision) ||
@@ -184,24 +230,62 @@ export default function App() {
           );
         localRevision.current = local?.revision ?? 0;
         damagedLocal.current = null;
+        let saved = Boolean(local);
+        if (session.mode !== "local") {
+          const link = readCloudLink();
+          if (session.mode === "offline") {
+            const resumed = { configured: true, authenticated: true, active: Boolean(link) && !viewer, revision: link?.revision ?? 0 };
+            cloudRef.current = resumed;
+            setCloud(resumed);
+            setCloudStatus(link ? "pending" : "local");
+          } else {
+            try {
+              const remote = await api("state");
+              if (!mounted) return;
+              const decision = cloudResumeDecision(local ? await fingerprintStore(state) : null, remote.revision, Boolean(remote.state), link);
+              let active = false;
+              if (decision === "cloud") {
+                state = validateStore(remote.state);
+                if (ownsTab.current) {
+                  const record = await saveLocal(state, localRevision.current, Boolean(local));
+                  localRevision.current = record.revision;
+                  saved = true;
+                  await rememberCloudLink(state, remote.revision);
+                }
+                active = !viewer && ownsTab.current;
+              } else if (decision === "local") {
+                active = !viewer && ownsTab.current;
+              } else if (decision === "conflict") {
+                setCloudError("تغییرات آفلاین شما و نسخهٔ ابری هر دو تغییر کرده‌اند؛ نسخهٔ محلی حفظ شد. در تنظیمات، ابتدا پشتیبان بگیرید و جهت انتقال را انتخاب کنید.");
+              }
+              const resumed = { configured: true, authenticated: true, active, revision: remote.revision };
+              cloudRef.current = resumed;
+              setCloud(resumed);
+              setCloudStatus(active ? (decision === "local" ? "pending" : "synced") : "local");
+            } catch (error) {
+              if (!mounted) return;
+              if (error instanceof TypeError || (error as Error).name === "TimeoutError") setOnline(false);
+              else setCloudError((error as Error).message);
+              const resumed = { configured: true, authenticated: true, active: Boolean(link) && !viewer, revision: link?.revision ?? 0 };
+              cloudRef.current = resumed;
+              setCloud(resumed);
+            }
+          }
+        }
+        if (!mounted) return;
         ready.current = true;
+        latest.current = state;
         setStore(state);
-        setSaveStatus(local ? "saved" : "pending");
-      })
-      .catch((e) => {
+        setSaveStatus(saved ? "saved" : "pending");
+      } catch (e) {
         if (!mounted) return;
         setSaveStatus("error");
         setReadOnly(true);
-        notify(e.message);
-        setStore(demoStore());
-      });
-    api("status")
-      .then((r) => {
-        if (mounted) setCloud({ ...r, active: false, revision: 0 });
-      })
-      .catch((e) => {
-        if (mounted && e instanceof TypeError) setOnline(false);
-      });
+        notify((e as Error).message);
+        setStore(initialWorkspace(session.mode === "local"));
+      }
+    };
+    void prepare();
     const on = () => setOnline(true),
       off = () => setOnline(false);
     window.addEventListener("online", on);
@@ -213,6 +297,10 @@ export default function App() {
     };
     window.addEventListener("beforeunload", unload);
     return () => {
+      flushLocalPending.current?.();
+      cloudEpoch.current++;
+      cloudPending.current = false;
+      cloudRef.current = { ...cloudRef.current, active: false };
       mounted = false;
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
@@ -259,6 +347,7 @@ export default function App() {
         );
         cloudRef.current = { ...cloudRef.current, revision: r.revision };
         setCloud((c) => ({ ...c, revision: r.revision }));
+        await rememberCloudLink(next, r.revision);
       }
       setCloudStatus("synced");
       setCloudError("");
@@ -279,7 +368,7 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    if (!store || !ready.current || readOnly) return;
+    if (!store || !ready.current || readOnly || viewer) return;
     latest.current = store;
     unsaved.current = true;
     setSaveStatus("pending");
@@ -319,7 +408,7 @@ export default function App() {
       if (flushLocalPending.current === persist)
         flushLocalPending.current = null;
     };
-  }, [store, notify, readOnly, syncCloud]);
+  }, [store, notify, readOnly, viewer, syncCloud]);
   useEffect(() => {
     if (
       online &&
@@ -358,8 +447,8 @@ export default function App() {
         notify("انتقال داده در حال انجام است؛ چند لحظه صبر کنید.");
         return;
       }
-      if (readOnly) {
-        notify("برای ویرایش، تب دیگر را ببندید و این صفحه را تازه کنید.");
+      if (readOnly || viewer) {
+        notify(viewer ? "حساب شما فقط اجازهٔ مشاهده دارد." : "برای ویرایش، تب دیگر را ببندید و این صفحه را تازه کنید.");
         return;
       }
       setStore((s) => {
@@ -383,15 +472,18 @@ export default function App() {
         return next;
       });
     },
-    [readOnly, notify],
+    [readOnly, viewer, notify],
   );
+  const canLeave = () => !hasDraft() || confirm("تغییرات ویرایشگر هنوز ذخیره نشده‌اند. از آن‌ها صرف‌نظر شود؟");
   const navigate = (v: View) => {
+    if (v !== view && !canLeave()) return;
     setView(v);
     setSidebar(false);
     window.scrollTo({ top: 0 });
   };
 
   const replaceStore = async (incoming: Store) => {
+    if (viewer) throw new Error("حساب شما فقط اجازهٔ مشاهده دارد.");
     const next = validateStore(incoming);
     if (readOnly && !ownsTab.current)
       throw new Error(
@@ -411,12 +503,14 @@ export default function App() {
       setReadOnly(false);
       setSaveStatus("saved");
       setStore(next);
+      forgetCloudLink();
     } else {
       forceBackup.current = true;
       mutate(() => next);
     }
   };
   const transferCloud = async (direction: "pull" | "push") => {
+    if (viewer && direction === "push") throw new Error("حساب شما فقط اجازهٔ مشاهده دارد.");
     if (readOnly)
       throw new Error(
         "این تب فقط برای مشاهده است؛ انتقال ابری از تب فعال انجام می‌شود.",
@@ -452,7 +546,7 @@ export default function App() {
           )
         )
           return;
-        downloadJson(snapshot, "Rooyesh-local-before-cloud.json");
+        downloadJson(snapshot, "Alireza-SEO-local-before-cloud-" + jalaliFileDate() + ".json");
         const saved = await saveLocal(next, localRevision.current, true);
         localRevision.current = saved.revision;
         latest.current = next;
@@ -461,7 +555,7 @@ export default function App() {
         cloudRef.current = {
           configured: true,
           authenticated: true,
-          active: true,
+          active: !viewer,
           revision: r.revision,
         };
       } else {
@@ -473,7 +567,7 @@ export default function App() {
           )
         )
           return;
-        if (r.state) downloadJson(r.state, "Rooyesh-cloud-before-replace.json");
+        if (r.state) downloadJson(r.state, "Alireza-SEO-cloud-before-replace-" + jalaliFileDate() + ".json");
         const saved = await api(
           "state",
           { state: snapshot, revision: r.revision },
@@ -487,6 +581,7 @@ export default function App() {
         };
       }
       setCloud(cloudRef.current);
+      await rememberCloudLink(latest.current ?? snapshot, cloudRef.current.revision);
       setCloudStatus("synced");
       setCloudError("");
       notify("همگام‌سازی فعال شد. تغییرات بعدی خودکار ذخیره می‌شوند.");
@@ -513,7 +608,7 @@ export default function App() {
     if (store) {
       downloadJson(
         damagedLocal.current ?? latest.current ?? store,
-        "Rooyesh-backup-" + new Date().toISOString().slice(0, 10) + ".json",
+        "Alireza-SEO-backup-" + jalaliFileDate() + ".json",
       );
       notify("پشتیبان همه پروژه‌ها دانلود شد.");
     }
@@ -524,7 +619,7 @@ export default function App() {
         <div className="brand-icon">
           <Leaf />
         </div>
-        <h2>رویش</h2>
+        <h2>استودیوی سئوی علیرضا ملائی</h2>
         <p>فضای کاری شما در حال آماده شدن است…</p>
       </div>
     );
@@ -544,12 +639,37 @@ export default function App() {
     onRowsChange: (key: Collection, rows: Project[Collection]) =>
       updateProject({ [key]: rows }),
     notify,
+    readOnly: readOnly || viewer,
+  };
+  const logout = async () => {
+    if (!canLeave()) return;
+    try {
+      flushLocalPending.current?.();
+      await saving.current;
+      if (unsaved.current) throw new Error("آخرین تغییرات ذخیره نشدند؛ پیش از خروج پشتیبان بگیرید.");
+      cloudEpoch.current++;
+      cloudPending.current = false;
+      cloudRef.current = { ...cloudRef.current, active: false };
+      await auth.logout();
+    } catch (error) { notify((error as Error).message); }
+  };
+  const installUpdate = async () => {
+    if (!canLeave()) return;
+    try {
+      flushLocalPending.current?.();
+      await saving.current;
+      if (unsaved.current) throw new Error("آخرین تغییرات ذخیره نشدند؛ پیش از به‌روزرسانی پشتیبان بگیرید.");
+      const registration = await navigator.serviceWorker.getRegistration();
+      if (!registration?.waiting) { setUpdateReady(false); return; }
+      navigator.serviceWorker.addEventListener("controllerchange", () => location.reload(), { once: true });
+      registration.waiting.postMessage({ type: "SKIP_WAITING" });
+    } catch (error) { notify((error as Error).message); }
   };
   return (
     <div className="app-shell">
       <aside className={"sidebar " + (sidebar ? "is-open" : "")}>
         <a
-          className="brand"
+          className="brand brand-personal"
           href="#"
           onClick={(e) => {
             e.preventDefault();
@@ -560,7 +680,7 @@ export default function App() {
             <Leaf size={25} />
           </span>
           <span>
-            رویش<small>فضای کاری سئو</small>
+            استودیوی سئو<small>علیرضا ملائی</small>
           </span>
         </a>
         <div className="sidebar-label">پروژه فعال</div>
@@ -569,9 +689,12 @@ export default function App() {
           <select
             aria-label="پروژه فعال"
             value={project.id}
-            onChange={(e) =>
-              mutate((s) => ({ ...s, activeProjectId: e.target.value }))
-            }
+            onChange={(e) => {
+              if (!canLeave()) return;
+              const id = e.target.value;
+              if (viewer) setStore((state) => state ? { ...state, activeProjectId: id } : state);
+              else mutate((s) => ({ ...s, activeProjectId: id }));
+            }}
           >
             {store.projects.map((p) => (
               <option key={p.id} value={p.id}>
@@ -582,7 +705,7 @@ export default function App() {
           <ChevronDown size={14} />
         </div>
         <button
-          disabled={readOnly}
+          disabled={readOnly || viewer}
           className="new-project-link"
           onClick={() => setNewProject(true)}
         >
@@ -653,6 +776,10 @@ export default function App() {
             <strong>{NAV.find((n) => n.key === view)?.label}</strong>
           </div>
           <div className="topbar-actions">
+            {updateReady && <button className="icon-button" onClick={() => void installUpdate()} aria-label="نصب نسخهٔ جدید برنامه" title="نسخهٔ جدید آماده است؛ ذخیره و به‌روزرسانی"><RefreshCw size={19} /></button>}
+            <button className="icon-button" onClick={toggleTheme} aria-label={theme === "light" ? "فعال کردن حالت تاریک" : "فعال کردن حالت روشن"} title={theme === "light" ? "حالت تاریک" : "حالت روشن"}>
+              {theme === "light" ? <Moon size={19} /> : <Sun size={19} />}
+            </button>
             <span className="connection-state">
               {online ? <span className="status-dot" /> : <WifiOff size={14} />}
               <span>
@@ -678,14 +805,16 @@ export default function App() {
               <Download size={16} />
               <span>خروجی Excel</span>
             </button>
-            <span className="user-avatar">م</span>
+            <span className="user-avatar" title={session.user.displayName}>{session.user.displayName.slice(0, 1)}</span>
+            {session.mode !== "local" && <button className="icon-button" onClick={() => void logout()} aria-label="خروج از حساب" title="خروج از حساب"><LogOut size={18} /></button>}
           </div>
         </header>
-        {(readOnly || saveStatus === "error" || cloudError) && (
+        {(readOnly || viewer || saveStatus === "error" || cloudError) && (
           <div className="warning-banner">
             <ShieldCheck size={17} />
             {saveStatus === "error"
               ? "ذخیره محلی انجام نشد. داده‌ها را پیش از بستن صفحه دانلود کنید و مشکل حافظه را بررسی کنید."
+              : viewer ? "حساب شما فقط برای مشاهده است؛ تغییر داده‌ها توسط مدیر و ویرایشگر انجام می‌شود."
               : readOnly
                 ? "این فضا در تب دیگری باز است. این تب فقط برای مشاهده است؛ برای ویرایش، تب دیگر را ببندید و صفحه را تازه کنید."
                 : saveStatus === "error"
@@ -708,6 +837,8 @@ export default function App() {
             <fieldset disabled={readOnly} className="workspace-access">
               <KeywordWorkspace key={project.id} {...props} />
             </fieldset>
+          ) : view === "bulk" ? (
+            <BulkEditWorkspace key={project.id} {...props} />
           ) : view === "pages" ? (
             <fieldset disabled={readOnly} className="workspace-access">
               <PageWorkspace key={project.id} {...props} />
@@ -733,7 +864,11 @@ export default function App() {
               setCloudStatus={setCloudStatus}
               clearCloudError={() => setCloudError("")}
               transferCloud={transferCloud}
-              readOnly={readOnly}
+              readOnly={readOnly || viewer}
+              viewer={viewer}
+              session={session}
+              auth={auth}
+              logout={logout}
               replaceStore={replaceStore}
               requestSnapshot={() => {
                 forceBackup.current = true;
@@ -741,7 +876,7 @@ export default function App() {
             />
           )}
           <footer className="page-footer">
-            <span>رویش · از اولین کلمه تا نتیجه</span>
+            <span>استودیوی سئوی علیرضا ملائی</span>
             <span>داده‌ها متعلق به شماست.</span>
           </footer>
         </main>
@@ -959,7 +1094,7 @@ function Dashboard({
             className="btn btn-ghost"
             onClick={() => {
               updateProject({
-                lastReview: new Date().toISOString().slice(0, 10),
+                lastReview: todayIso(),
               });
             }}
           >
@@ -1140,8 +1275,8 @@ function Dashboard({
           {[
             ["نوع پروژه", project.projectType],
             ["زبان / بازار", project.language + " / " + project.market],
-            ["شروع پروژه", project.startDate || "ثبت نشده"],
-            ["آخرین مرور", project.lastReview || "هنوز مرور نشده"],
+            ["شروع پروژه", project.startDate ? formatDate(project.startDate) : "ثبت نشده"],
+            ["آخرین مرور", project.lastReview ? formatDate(project.lastReview) : "هنوز مرور نشده"],
           ].map(([l, v]) => (
             <div className="info-row" key={l}>
               <span>{l}</span>
@@ -1157,13 +1292,13 @@ function Dashboard({
           </button>
         </section>
       </div>
-      <div className="demo-notice">
+      {project.name === "دوربین۲۴" && project.keywords.length <= 6 && <div className="demo-notice">
         <BookOpen size={18} />
         <span>
           پروژه اولیه چند ردیف نمونه دارد؛ می‌توانی آن‌ها را ویرایش کنی یا از
           تنظیمات پاک کنی. پروژه جدید کاملاً خالی ساخته می‌شود.
         </span>
-      </div>
+      </div>}
     </>
   );
 }
@@ -1183,6 +1318,10 @@ function SettingsPanel({
   readOnly,
   replaceStore,
   requestSnapshot,
+  viewer,
+  session,
+  auth,
+  logout,
 }: {
   store: Store;
   project: Project;
@@ -1210,6 +1349,10 @@ function SettingsPanel({
   readOnly: boolean;
   replaceStore: (state: Store) => Promise<void>;
   requestSnapshot: () => void;
+  viewer: boolean;
+  session: AuthSession;
+  auth: AuthActions;
+  logout: () => Promise<void>;
 }) {
   const [tab, setTab] = useState("project");
   const [password, setPassword] = useState("");
@@ -1295,12 +1438,16 @@ function SettingsPanel({
         {[
           ["project", "پروژه و تنظیمات"],
           ["backup", "پشتیبان و فضای ابری"],
+          ["security", "حساب و تیم"],
           ["guide", "راهنمای فیلدها"],
         ].map(([k, v]) => (
           <button
             className={tab === k ? "active" : ""}
             key={k}
-            onClick={() => setTab(k)}
+            onClick={() => {
+              if (k !== tab && hasDraft() && !confirm("تغییرات این بخش هنوز ثبت نشده‌اند. از آن‌ها صرف‌نظر شود؟")) return;
+              setTab(k);
+            }}
           >
             {v}
           </button>
@@ -1325,20 +1472,21 @@ function SettingsPanel({
               ].map(([k, l]) => (
                 <label className="field" key={k}>
                   {l}
-                  <input
+                  {k === "startDate" || k === "lastReview" ? <JalaliDateInput
                     disabled={readOnly}
-                    type={
-                      k.toLowerCase().includes("date") || k === "lastReview"
-                        ? "date"
-                        : "text"
-                    }
+                    value={String(project[k as keyof Project] ?? "")}
+                    onChange={(value) => updateProject({ [k]: value })}
+                    aria-label={l}
+                  /> : <input
+                    disabled={readOnly}
+                    type="text"
                     value={String(project[k as keyof Project] ?? "")}
                     maxLength={10000}
                     onChange={(e) => {
                       if (k === "name" && !e.target.value.trim()) return;
                       updateProject({ [k]: e.target.value });
                     }}
-                  />
+                  />}
                 </label>
               ))}
               <label className="field">
@@ -1559,10 +1707,10 @@ function SettingsPanel({
               snapshots.map((s) => (
                 <div className="snapshot-row" key={s.savedAt}>
                   <span>
-                    {new Intl.DateTimeFormat("fa-IR", {
+                    {formatDate(s.savedAt, {
                       dateStyle: "short",
                       timeStyle: "short",
-                    }).format(new Date(s.savedAt))}
+                    })}
                   </span>
                   <span>{fa(s.state.projects.length)} پروژه</span>
                   <button
@@ -1649,7 +1797,7 @@ function SettingsPanel({
                 </p>
                 <div className="action-row">
                   <button
-                    disabled={busy || readOnly}
+                    disabled={busy || (readOnly && !viewer) || session.mode === "offline"}
                     className="btn btn-secondary"
                     onClick={() => void cloudOperation("pull")}
                   >
@@ -1665,22 +1813,7 @@ function SettingsPanel({
                   <button
                     disabled={busy}
                     className="btn btn-ghost"
-                    onClick={async () => {
-                      try {
-                        await api("logout", {});
-                        setCloud((c) => ({
-                          ...c,
-                          authenticated: false,
-                          active: false,
-                        }));
-                        setCloudStatus("local");
-                        notify(
-                          "از فضای ابری خارج شدید؛ داده‌های دستگاه باقی ماند.",
-                        );
-                      } catch (e) {
-                        notify((e as Error).message);
-                      }
-                    }}
+                    onClick={() => void logout()}
                   >
                     خروج
                   </button>
@@ -1694,6 +1827,17 @@ function SettingsPanel({
               </>
             )}
           </section>
+        </>
+      ) : tab === "security" ? (
+        <>
+          <TeamSettings session={session} onSessionRefresh={auth.refresh} readOnly={session.mode === "offline"} />
+          {session.mode !== "local" && <section className="settings-card">
+            <h3>دسترسی آفلاین این دستگاه</h3>
+            <label className="field offline-access-choice">
+              <span><input type="checkbox" checked={auth.offlineEnabled} onChange={(event) => auth.setOfflineEnabled(event.target.checked)} /> این دستگاه شخصی است؛ دسترسی آفلاین فعال باشد</span>
+            </label>
+            <p className="muted">این انتخاب فقط برای همین مرورگر است. پس از خروج یا پایان اعتبار ورود، دسترسی آفلاین بسته می‌شود. روی دستگاه مشترک آن را فعال نکنید.</p>
+          </section>}
         </>
       ) : (
         <>

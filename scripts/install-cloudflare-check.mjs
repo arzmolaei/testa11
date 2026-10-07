@@ -217,11 +217,12 @@ test('wrong existing password gets one login attempt and preserves cloud secret'
   assert.equal(f.cloud.secrets.length, 1);
 });
 
-test('explicit password reset asks for RESET; declining does not upload replacement', async t => {
+test('installer password reset cannot overwrite independent team account passwords', async t => {
   const f = await fixture(t, { promptAnswers: ['no'] });
   await installCloudflare({}, f.dependencies);
   const before = f.calls.length;
-  await assert.rejects(installCloudflare({ resetPassword: true }, f.dependencies), /Password change cancelled/);
+  await assert.rejects(installCloudflare({ resetPassword: true }, f.dependencies), /Change account passwords in the app/);
+  assert.equal(f.calls.length, before);
   assert.equal(f.calls.slice(before).some(call => hasCommand(call, 'secret', 'put')), false);
 });
 

@@ -33,6 +33,8 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import "./KeywordWorkspace.css";
+import { formatJalaliInput, jalaliFileDate } from "../dates";
+import { JalaliDateInput } from "./JalaliDateInput";
 
 type ImportKey = "keyword" | "volume" | "kdTool" | "toolIntent" | "source";
 type ImportState = {
@@ -180,14 +182,14 @@ function downloadCsv(rows: Row[], customLabels?: Record<string, string>) {
     "\uFEFF" +
     [
       fields.map((f) => escape(customLabels?.[f.key] || f.label)).join(","),
-      ...rows.map((r) => fields.map((f) => escape(r[f.key])).join(",")),
+      ...rows.map((r) => fields.map((f) => escape(f.type === "date" && r[f.key] ? formatJalaliInput(String(r[f.key])) || "تاریخ نامعتبر" : r[f.key])).join(",")),
     ].join("\r\n");
   const url = URL.createObjectURL(
     new Blob([csv], { type: "text/csv;charset=utf-8;" }),
   );
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `keywords-${new Date().toISOString().slice(0, 10)}.csv`;
+  anchor.download = `keywords-${jalaliFileDate()}.csv`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -197,6 +199,7 @@ export function KeywordWorkspace({
   settings,
   onRowsChange,
   notify,
+  readOnly = false,
 }: WorkspaceProps) {
   const rows = project.keywords;
   const [query, setQuery] = useState("");
@@ -281,7 +284,10 @@ export function KeywordWorkspace({
   const duplicateRows = rows.filter(
     (r) => (dupeCounts.get(normalizeKeyword(String(r.keyword ?? ""))) ?? 0) > 1,
   ).length;
-  const updateRows = (updated: Row[]) => onRowsChange("keywords", updated);
+  const updateRows = (updated: Row[]) => {
+    if (readOnly) { notify("حساب شما فقط اجازهٔ مشاهده دارد."); return; }
+    onRowsChange("keywords", updated);
+  };
   const changeFilter = (setter: (value: string) => void, value: string) => {
     setter(value);
     setPage(1);
@@ -345,6 +351,7 @@ export function KeywordWorkspace({
     return () => window.removeEventListener("beforeunload", protectDraft);
   }, [draftDirty]);
   const saveDraft = () => {
+    if (readOnly) return;
     if (!draft || !String(draft.keyword ?? "").trim()) {
       setEditError("کلمه کلیدی را وارد کنید.");
       return;
@@ -625,6 +632,7 @@ export function KeywordWorkspace({
         </span>
         {field.type === "textarea" ? (
           <textarea
+            disabled={readOnly}
             maxLength={100000}
             id={fieldId}
             rows={3}
@@ -633,6 +641,7 @@ export function KeywordWorkspace({
           />
         ) : field.type === "select" ? (
           <select
+            disabled={readOnly}
             id={fieldId}
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -648,8 +657,11 @@ export function KeywordWorkspace({
               </option>
             ))}
           </select>
+        ) : field.type === "date" ? (
+          <JalaliDateInput id={fieldId} disabled={readOnly} value={String(value)} onChange={setValue} aria-label={settings.customLabels?.[field.key] || field.label} />
         ) : (
           <input
+            disabled={readOnly}
             id={fieldId}
             data-autofocus={field.key === "keyword" ? true : undefined}
             type={field.type === "url" ? "text" : (field.type ?? "text")}
@@ -681,11 +693,11 @@ export function KeywordWorkspace({
           </p>
         </div>
         <div className="kw-heading-actions">
-          <button className="btn btn-secondary" onClick={openImport}>
+          <button disabled={readOnly} className="btn btn-secondary" onClick={openImport}>
             <Upload size={17} />
             ورود داده
           </button>
-          <button className="btn btn-primary" onClick={() => openRow()}>
+          <button disabled={readOnly} className="btn btn-primary" onClick={() => openRow()}>
             <Plus size={18} />
             کلمه جدید
           </button>
@@ -809,15 +821,17 @@ export function KeywordWorkspace({
               انتخاب شده
             </span>
             <div>
-              <button onClick={() => bulkDecision("Keep")}>
+              {filtered.some((row) => !validSelected.has(row.id)) && <button onClick={() => setSelected(new Set(filtered.map((row) => row.id)))}>انتخاب همهٔ {filtered.length.toLocaleString("fa-IR")} نتیجه</button>}
+              <button disabled={readOnly} onClick={() => bulkDecision("Keep")}>
                 <Check size={15} />
                 نگه‌داشتن
               </button>
-              <button onClick={() => bulkDecision("Review")}>بررسی</button>
-              <button onClick={() => bulkDecision("Exclude")}>
+              <button disabled={readOnly} onClick={() => bulkDecision("Review")}>بررسی</button>
+              <button disabled={readOnly} onClick={() => bulkDecision("Exclude")}>
                 کنارگذاشتن
               </button>
               <button
+                disabled={readOnly}
                 onClick={() => {
                   setBulkGroup("");
                   setGroupModal(true);
@@ -826,6 +840,7 @@ export function KeywordWorkspace({
                 تعیین گروه
               </button>
               <button
+                disabled={readOnly}
                 className="kw-danger-text"
                 onClick={() => setDeleteIds([...validSelected])}
               >
@@ -1116,7 +1131,7 @@ export function KeywordWorkspace({
               )}
             </div>
             <div className="drawer-footer">
-              <button className="btn btn-primary" onClick={saveDraft}>
+              <button disabled={readOnly} className="btn btn-primary" onClick={saveDraft}>
                 <Check size={17} />
                 ذخیره تغییرات
               </button>
@@ -1125,6 +1140,7 @@ export function KeywordWorkspace({
               </button>
               {!newRow && (
                 <button
+                  disabled={readOnly}
                   className="btn btn-ghost kw-delete-row"
                   onClick={() => setDeleteIds([draft.id])}
                 >

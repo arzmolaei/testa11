@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { formatJalaliInput, toIsoDate } from "./dates";
 import type {
   Collection,
   Field,
@@ -394,7 +395,7 @@ function writeStart(
   for (let row = 1; row <= 42; row++)
     for (let col = 1; col <= 8; col++)
       paint(sheet.getCell(row, col), COLORS.paper);
-  band(sheet, 1, 1, 8, "رویش • فضای روشن مدیریت سئو", COLORS.teal);
+  band(sheet, 1, 1, 8, "استودیوی سئو • علیرضا ملائی", COLORS.teal);
   sheet.getRow(1).height = 52;
   band(
     sheet,
@@ -411,8 +412,8 @@ function writeStart(
     ["زبان", project.language],
     ["نوع پروژه", project.projectType],
     ["هدف سئو", project.goal],
-    ["تاریخ شروع", project.startDate],
-    ["آخرین مرور", project.lastReview],
+    ["تاریخ شروع", formatJalaliInput(toIsoDate(project.startDate) || "")],
+    ["آخرین مرور", formatJalaliInput(toIsoDate(project.lastReview) || "")],
   ];
   info.forEach(([label, value], index) => {
     const row = 4 + Math.floor(index / 2) * 2;
@@ -793,7 +794,8 @@ function writeCollection(
           ? `${page.pageId || reference}${collection === "content" ? ` • ${page.target || ""}` : ""}`
           : reference;
       }
-      const result = safeValue(fieldValue(record, field.key, settings));
+      const value = fieldValue(record, field.key, settings);
+      const result = safeValue(field.type === "date" && value ? formatJalaliInput(toIsoDate(String(value)) || "") || "تاریخ نامعتبر" : value);
       const formula = localFormula(
         collection,
         field.key,
@@ -853,7 +855,9 @@ function writeCollection(
       field.hidden ? COLORS.violet : gutter ? COLORS.paper : COLORS.mint,
       true,
     );
-    header.note = noteFor(field, field.module);
+    header.note = field.type === "date"
+      ? `${noteFor(field, field.module)} • تاریخ شمسی: سال/ماه/روز؛ مانند ۱۴۰۵/۰۷/۱۵`
+      : noteFor(field, field.module);
     if (field.options) {
       const name = validationNames.get(
         listKey(field.options) || `field_${field.key}`,
@@ -906,6 +910,7 @@ function writeCollection(
                 : COLORS.paper),
       );
       if (field.type === "number") cell.numFmt = "#,##0.##";
+      if (field.type === "date") cell.alignment = { ...cell.alignment, readingOrder: "ltr", horizontal: "center" };
       if (
         field.key === "url" ||
         field.type === "url" ||
@@ -982,7 +987,7 @@ export async function buildWorkbook(
   settings: Settings,
 ): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "Rooyesh SEO Studio";
+  workbook.creator = "Alireza SEO Studio";
   workbook.title = `SEO Project • ${project.name}`;
   workbook.subject = "Reusable keyword-to-results SEO workspace";
   workbook.description =

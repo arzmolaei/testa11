@@ -52,9 +52,9 @@ function Get-NodeExecutable {
     }
     $existing = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue
     if ($existing) {
-        $version = & $existing.Source -p 'parseInt(process.versions.node)' 2>$null
+        $version = & $existing.Source -p 'process.versions.node' 2>$null
         $architecture = & $existing.Source -p 'process.arch' 2>$null
-        if ($LASTEXITCODE -eq 0 -and "$version" -match '^\d+$' -and [int]$version -ge 22 -and $architecture -in @('x64', 'arm64')) {
+        if ($LASTEXITCODE -eq 0 -and "$version" -match '^\d+\.\d+\.\d+$' -and [Version]$version -ge [Version]'22.13.0' -and $architecture -in @('x64', 'arm64')) {
             return $existing.Source
         }
     }
@@ -122,16 +122,21 @@ try {
         New-Item -ItemType Directory -Path $releases -Force | Out-Null
         $appRoot = Join-Path $releases $SourceRef
         $marker = Join-Path $appRoot '.rooyesh-source-ref'
-        if (-not (Test-Path -LiteralPath $marker)) {
-            if (Test-Path -LiteralPath $appRoot) {
+        if ($SourceRef -eq 'main' -or -not (Test-Path -LiteralPath $marker)) {
+            if ($SourceRef -ne 'main' -and (Test-Path -LiteralPath $appRoot)) {
                 throw "An unfinished or unrelated folder exists at $appRoot. Rename that folder and run again."
             }
-            Write-Host 'Downloading Rooyesh from GitHub...' -ForegroundColor Cyan
+            Write-Host 'Downloading Alireza SEO Studio from GitHub...' -ForegroundColor Cyan
             $stage = Join-Path $installRoot ('source-stage-' + [Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $stage | Out-Null
             try {
                 $sourceZip = Join-Path $stage 'source.zip'
                 Get-VerifiedDownload "https://codeload.github.com/arzmolaei/testa11/zip/$SourceRef" $sourceZip
+                if ($SourceRef -eq 'main') {
+                    $sourceHash = (Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 16)
+                    $appRoot = Join-Path $releases "main-$sourceHash"
+                    $marker = Join-Path $appRoot '.rooyesh-source-ref'
+                }
                 $expanded = Join-Path $stage 'expanded'
                 Expand-SafeArchive $sourceZip $expanded
                 $roots = @(Get-ChildItem -LiteralPath $expanded -Directory)
@@ -141,15 +146,18 @@ try {
                     -not (Test-Path -LiteralPath (Join-Path $downloaded 'scripts\install-cloudflare.mjs'))) {
                     throw 'The GitHub archive does not contain the complete installer.'
                 }
-                Set-Content -LiteralPath (Join-Path $downloaded '.rooyesh-source-ref') -Value $SourceRef -Encoding ASCII
-                Move-Item -LiteralPath $downloaded -Destination $appRoot
+                if (-not (Test-Path -LiteralPath $marker)) {
+                    if (Test-Path -LiteralPath $appRoot) { throw "An incomplete release exists at $appRoot. Rename it and run again." }
+                    Set-Content -LiteralPath (Join-Path $downloaded '.rooyesh-source-ref') -Value $SourceRef -Encoding ASCII
+                    Move-Item -LiteralPath $downloaded -Destination $appRoot
+                }
             } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
     $helper = Join-Path $appRoot 'scripts\install-cloudflare.mjs'
     if (-not (Test-Path -LiteralPath $helper)) { throw "Installer source is incomplete at $appRoot." }
     Write-Host ''
-    Write-Host 'Rooyesh - automatic Cloudflare installation' -ForegroundColor Green
+    Write-Host 'Alireza SEO Studio - automatic Cloudflare installation' -ForegroundColor Green
     Write-Host 'Cloudflare login approval stays in your browser. No API key is needed.'
     Write-Host 'Keep this window open. If a step fails, run the same command again.'
     Push-Location $appRoot
@@ -162,10 +170,17 @@ try {
         $shortcut = Join-Path $env:ROOYESH_INSTALL_DIR 'Open-Rooyesh.url'
         $desktop = [Environment]::GetFolderPath('Desktop')
         if ($desktop -and (Test-Path -LiteralPath $shortcut)) {
-            $desktopShortcut = Join-Path $desktop 'Rooyesh.url'
+            $desktopShortcut = Join-Path $desktop 'Alireza SEO Studio.url'
             if (-not (Test-Path -LiteralPath $desktopShortcut)) {
                 try { Copy-Item -LiteralPath $shortcut -Destination $desktopShortcut } catch {
                     Write-Host 'The desktop shortcut could not be created. The app address is printed above.' -ForegroundColor Yellow
+                }
+            }
+            $updater = Join-Path $appRoot 'Update-Alireza-SEO.cmd'
+            $desktopUpdater = Join-Path $desktop 'Update Alireza SEO Studio.cmd'
+            if ((Test-Path -LiteralPath $updater) -and -not (Test-Path -LiteralPath $desktopUpdater)) {
+                try { Copy-Item -LiteralPath $updater -Destination $desktopUpdater } catch {
+                    Write-Host 'The update shortcut could not be created. Run Update-Alireza-SEO.cmd from the app folder when needed.' -ForegroundColor Yellow
                 }
             }
         }

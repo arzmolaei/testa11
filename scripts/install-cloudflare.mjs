@@ -226,6 +226,7 @@ export async function verifyDeployment(url, password, { fetcher = fetch, sleep =
 }
 
 export async function installCloudflare(options = {}, dependencies = {}) {
+  if (options.resetPassword) throw new Error('Change account passwords in the app Account and Team settings. The installer never resets an existing account password.');
   const root = dependencies.root || sourceRoot;
   const installDir = path.resolve(dependencies.installDir || process.env.ROOYESH_INSTALL_DIR || path.join(root, '.rooyesh-install'));
   const runner = dependencies.runner || commandRunner();
@@ -258,7 +259,7 @@ export async function installCloudflare(options = {}, dependencies = {}) {
   }
   let password;
   try {
-    log('Rooyesh cloud installer');
+    log('Alireza SEO Studio installer');
     log(options.dryRun ? 'Local checks only: no Cloudflare login, resources, or publishing.' : 'The installer will publish your private SEO app to your Cloudflare account.');
     await runner({ command: process.execPath, args: [npmCLI, 'ci', '--no-audit', '--no-fund'], cwd: root, env, label: 'Dependency installation' });
     await runner({ command: process.execPath, args: [npmCLI, 'run', 'build'], cwd: root, env, label: 'App build' });
@@ -363,12 +364,8 @@ export async function installCloudflare(options = {}, dependencies = {}) {
     }
     if (!Array.isArray(secrets)) throw new Error('Cloudflare returned an invalid secret list.');
     const hasPassword = secrets.some(item => item.name === 'APP_PASSWORD');
-    if (!hasPassword && state.passwordConfigured && !options.resetPassword) throw new Error('The existing cloud password is missing. Check Cloudflare, or deliberately rerun with --reset-password to set a new one.');
-    if (options.resetPassword && hasPassword) {
-      const answer = (await prompt('Changing the password signs out every device. Type RESET to continue: ')).trim();
-      if (answer !== 'RESET') throw new Error('Password change cancelled. Existing projects and password are unchanged.');
-    }
-    if (!hasPassword || options.resetPassword) {
+    if (!hasPassword && state.passwordConfigured) throw new Error('The existing session secret is missing. Restore APP_PASSWORD in Cloudflare before updating; existing account passwords are preserved.');
+    if (!hasPassword) {
       log('Choose a password for signing into the app. It will be stored as a Cloudflare secret.');
       password = await newPassword(secret, log);
       try { await wrangler(['secret', 'put', 'APP_PASSWORD'], { input: `${password}\n`, quiet: true, label: 'App password upload' }); }
@@ -379,8 +376,8 @@ export async function installCloudflare(options = {}, dependencies = {}) {
       state.passwordConfigured = true;
       await save();
     } else {
-      log('The existing app password will be kept. Enter it only to verify the published app.');
-      password = await secret('Existing app password: ');
+      log('Existing account passwords will be kept. Enter the current alireza account password to verify the update.');
+      password = await secret('Current alireza password: ');
       if (!validPassword(password)) throw new Error('The existing app password must contain at least 12 characters.');
     }
     log('Publishing the app...');
@@ -399,6 +396,7 @@ export async function installCloudflare(options = {}, dependencies = {}) {
     await save();
     await writeFile(path.join(installDir, 'Open-Rooyesh.url'), `[InternetShortcut]\r\nURL=${url}\r\n`, { mode: 0o600 });
     log(`Installation complete. App: ${url}`);
+    log('Owner username: alireza. Team accounts can be managed inside Account and Team settings.');
     log(`Database read verified (revision ${revision}). Your password was not saved on this computer.`);
     log(`To open it later: ${path.join(installDir, 'Open-Rooyesh.url')}`);
     try { await browser(url); } catch { log(`Open this address in your browser: ${url}`); }
@@ -411,9 +409,10 @@ export async function installCloudflare(options = {}, dependencies = {}) {
 
 if (import.meta.url === pathToFileURL(path.resolve(process.argv[1] || '')).href) {
   try {
-    if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 or newer is required. Run Install-Rooyesh.cmd.');
+    const [major, minor] = process.versions.node.split('.').map(Number);
+    if (major < 22 || (major === 22 && minor < 13)) throw new Error('Node.js 22.13 or newer is required. Run Install-Rooyesh.cmd.');
     const options = parseArguments(process.argv.slice(2));
-    if (options.help) console.log('Usage: node scripts/install-cloudflare.mjs [--dry-run] [--device-login] [--reset-password]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nRerun the same installer after a failure; resources and existing projects are preserved.');
+    if (options.help) console.log('Usage: node scripts/install-cloudflare.mjs [--dry-run] [--device-login]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nRerun the same installer after a failure; resources and existing projects are preserved.\nAccount passwords are changed inside the app, never by updating.');
     else await installCloudflare(options);
   } catch (error) {
     console.error(`\nInstallation stopped: ${error.message}`);

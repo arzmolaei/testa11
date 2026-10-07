@@ -7,6 +7,7 @@ import type {
   Settings,
   Store,
 } from "./types";
+import { todayIso, toIsoDate } from "./dates";
 
 export const DEFAULT_SETTINGS: Settings = {
   titleMin: 30,
@@ -482,7 +483,7 @@ export function createProject(name = "پروژه جدید"): Project {
     language: "فارسی",
     projectType: "Ecommerce",
     goal: "",
-    startDate: new Date().toISOString().slice(0, 10),
+    startDate: todayIso(),
     lastReview: "",
     keywords: [],
     pages: [],
@@ -868,7 +869,7 @@ export function demoStore(): Store {
   Object.assign(project, {
     domain: "dorbin24.com",
     goal: "رشد فروش ارگانیک دوربین‌های مداربسته و تجهیزات امنیتی",
-    lastReview: new Date().toISOString().slice(0, 10),
+    lastReview: todayIso(),
   });
   project.keywords = [
     {
@@ -999,9 +1000,7 @@ export function demoStore(): Store {
       briefStatus: "Brief Ready",
       writingStatus: "Writing",
       owner: "تیم محتوا",
-      publishDate: new Date(Date.now() + 7 * 86400000)
-        .toISOString()
-        .slice(0, 10),
+      publishDate: todayIso(new Date(Date.now() + 7 * 86400000)),
       internalLinkTarget: String(category.url),
       h2Ideas: "کیفیت تصویر\nدید در شب\nمحل نصب\nبودجه",
       notes: "این یک تقویم محتوای نمونه است.",
@@ -1036,7 +1035,7 @@ export function demoStore(): Store {
       previousImpressions: 5900,
       previousCtr: 2.41,
       previousPosition: 11.2,
-      lastChecked: new Date().toISOString().slice(0, 10),
+      lastChecked: todayIso(),
       notes: "اعداد نمونه و ساختگی هستند؛ برای نمایش قابلیت مقایسه.",
     },
   ];
@@ -1213,6 +1212,11 @@ export function importMetrics(
     for (const field of importable) {
       if (!present(source[field])) continue;
       let value = source[field];
+      if (field === "metricUpdated") {
+        const normalized = toIsoDate(String(value));
+        if (!normalized) { rowConflict = true; continue; }
+        value = normalized;
+      }
       if (numericMetrics.has(field)) {
         const parsed = metricNumber(value);
         if (

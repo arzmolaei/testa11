@@ -42,4 +42,5 @@ export type WorkspaceProps = {
   settings: Settings;
   onRowsChange: (collection: Collection, rows: Row[]) => void;
   notify: (message: string) => void;
+  readOnly?: boolean;
 };

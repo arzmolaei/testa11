@@ -6,6 +6,10 @@ import "@fontsource/vazirmatn/600.css";
 import "@fontsource/vazirmatn/700.css";
 import App from "./App";
 import "./styles.css";
+import "./dark-theme.css";
+import "./enhancements.css";
+import { initializeTheme } from "./theme";
+initializeTheme();
 class Boundary extends React.Component<
   { children: React.ReactNode },
   { failed: boolean }
@@ -37,5 +41,15 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 );
 if ("serviceWorker" in navigator && import.meta.env.PROD)
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.register("/sw.js").then((registration) => {
+      const announce = () => {
+        if (registration.waiting && navigator.serviceWorker.controller)
+          window.dispatchEvent(new Event("seo:update-ready"));
+      };
+      announce();
+      registration.addEventListener("updatefound", () => {
+        registration.installing?.addEventListener("statechange", announce);
+      });
+      void registration.update().catch(() => {});
+    }).catch(() => {});
   });

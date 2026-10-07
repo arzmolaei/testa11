@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 import { buildWorkbook } from "../src/export";
 import { demoStore, SCHEMAS } from "../src/domain";
+import { formatJalaliInput } from "../src/dates";
 
 const names = [
   "00_START",
@@ -17,6 +18,26 @@ function column(sheet: ExcelJS.Worksheet, label: string): number {
 }
 
 describe("portable SEO workbook", () => {
+  it("exports project and schema dates in Shamsi while preserving ISO source dates", async () => {
+    const store = demoStore();
+    const project = store.projects[0];
+    project.startDate = "2026-10-07";
+    project.lastReview = "2026-03-21";
+    project.content[0].publishDate = "2025-03-20";
+    project.results[0].baselineDate = "2026-10-07";
+    const workbook = await buildWorkbook(project, store.settings);
+    const start = workbook.getWorksheet("00_START")!;
+    expect(start.getCell("A11").value).toBe("۱۴۰۵/۰۷/۱۵");
+    expect(start.getCell("E11").value).toBe("۱۴۰۵/۰۱/۰۱");
+    const content = workbook.getWorksheet("03_CONTENT")!;
+    expect(content.getCell(5, column(content, "تاریخ انتشار")).value).toBe("۱۴۰۳/۱۲/۳۰");
+    const results = workbook.getWorksheet("04_RESULTS")!;
+    expect(results.getCell(5, column(results, "تاریخ مبنا")).value).toBe(formatJalaliInput(project.results[0].baselineDate as string));
+    const actionLabel = SCHEMAS.results.flatMap((section) => section.fields).find((field) => field.key === "nextAction")!.label;
+    expect(results.getCell(5, column(results, actionLabel)).formula).toBeTruthy();
+    expect(project.startDate).toBe("2026-10-07");
+    expect(project.content[0].publishDate).toBe("2025-03-20");
+  });
   it("round-trips six RTL sheets, stable manual data, formulas, dropdowns and independent groups", async () => {
     const store = demoStore();
     const project = store.projects[0];

@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { chunkJSON, validState } from "../worker/index";
 import type { Env } from "../worker/index";
 import type { Store } from "../src/types";
+import { TestD1 as FakeDB } from "./helpers/d1";
 
 const origin = "https://seo.example";
 const password = "test-only-long-password-123";
@@ -31,110 +32,6 @@ function state(): Store {
   };
 }
 
-// An in-memory D1 adapter exercises the real Worker routing, auth and CAS code.
-// Local Wrangler smoke tests separately exercise the actual SQLite migration.
-class FakeDB {
-  revision = 0;
-  snapshot: string | null = null;
-  snapshots = new Map<string, Map<number, string>>();
-  attempts = new Map<string, { attempts: number; window: number }>();
-  failure = false;
-
-  prepare(sql: string) {
-    const db = this;
-    let values: unknown[] = [];
-    const statement = {
-      sql,
-      get values() {
-        return values;
-      },
-      bind(...input: unknown[]) {
-        values = input;
-        return statement;
-      },
-      async first() {
-        if (db.failure) throw new Error("private database detail");
-        if (sql.startsWith("INSERT INTO seo_login_attempts")) {
-          const [id, now, cutoff] = values as [string, number, number];
-          const old = db.attempts.get(id);
-          if (old && old.window > cutoff && old.attempts > 10) return null;
-          const next =
-            !old || old.window <= cutoff
-              ? { attempts: 1, window: now }
-              : { ...old, attempts: old.attempts + 1 };
-          db.attempts.set(id, next);
-          return { attempts: next.attempts };
-        }
-        throw new Error(`Unsupported test SQL: ${sql}`);
-      },
-      async all() {
-        if (db.failure) throw new Error("private database detail");
-        if (sql.startsWith("SELECT m.revision")) {
-          const chunks = db.snapshot && db.snapshots.get(db.snapshot);
-          return {
-            success: true,
-            results: chunks
-              ? [...chunks]
-                  .sort((a, b) => a[0] - b[0])
-                  .map(([chunk_index, payload]) => ({
-                    revision: db.revision,
-                    snapshot_id: db.snapshot,
-                    chunk_index,
-                    payload,
-                  }))
-              : [
-                  {
-                    revision: db.revision,
-                    snapshot_id: null,
-                    chunk_index: null,
-                    payload: null,
-                  },
-                ],
-          };
-        }
-        throw new Error(`Unsupported test SQL: ${sql}`);
-      },
-      async run() {
-        if (db.failure) throw new Error("private database detail");
-        if (sql.startsWith("DELETE FROM seo_login_attempts")) {
-          db.attempts.delete(values[0] as string);
-          return { success: true, meta: { changes: 1 } };
-        }
-        if (sql === "DELETE FROM seo_chunks WHERE snapshot_id = ?") {
-          db.snapshots.delete(values[0] as string);
-          return { success: true, meta: { changes: 1 } };
-        }
-        if (sql.startsWith("DELETE FROM seo_chunks WHERE snapshot_id NOT IN"))
-          return { success: true, meta: { changes: 0 } };
-        throw new Error(`Unsupported test SQL: ${sql}`);
-      },
-    };
-    return statement;
-  }
-
-  async batch(statements: ReturnType<FakeDB["prepare"]>[]) {
-    if (this.failure) throw new Error("private database detail");
-    // No await inside this loop: represent D1's atomic transaction for contenders.
-    return statements.map((statement) => {
-      const [id, index, payload] = statement.values;
-      if (statement.sql.startsWith("INSERT INTO seo_chunks")) {
-        const chunks =
-          this.snapshots.get(id as string) || new Map<number, string>();
-        chunks.set(index as number, payload as string);
-        this.snapshots.set(id as string, chunks);
-        return { success: true, meta: { changes: 1 } };
-      }
-      if (statement.sql.startsWith("UPDATE seo_meta")) {
-        if (this.revision !== index)
-          return { success: true, meta: { changes: 0 } };
-        this.revision++;
-        this.snapshot = id as string;
-        return { success: true, meta: { changes: 1 } };
-      }
-      throw new Error(`Unsupported test SQL: ${statement.sql}`);
-    });
-  }
-}
 
 function request(
   path: string,
@@ -167,6 +64,8 @@ describe("Cloud Worker", () => {
       APP_PASSWORD: password,
     };
   });
+
+  afterEach(() => db.close());
 
   async function login() {
     const response = await worker.fetch(
@@ -220,7 +119,7 @@ describe("Cloud Worker", () => {
           env,
         )
       ).json(),
-    ).toEqual({ configured: true, authenticated: true });
+    ).toMatchObject({ configured: true, authenticated: true, user: { username: "alireza", displayName: "علیرضا ملائی", role: "owner" } });
   });
 
   it("supports local HTTP sessions without Secure and clears logout cookies", async () => {

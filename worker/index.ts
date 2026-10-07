@@ -1,6 +1,7 @@
 import { validateStore } from "../src/domain";
 import type { D1Database, Fetcher } from "@cloudflare/workers-types";
 import type { Store } from "../src/types";
+import { Accounts, AuthError, base64url, cookie } from "./auth";
 
 export interface Env {
   DB?: D1Database;
@@ -8,8 +9,6 @@ export interface Env {
   APP_PASSWORD?: string;
 }
 
-const COOKIE = "seo_session";
-const SESSION_SECONDS = 60 * 60 * 24 * 7;
 const MAX_BYTES = 25 * 1024 * 1024;
 const CHUNK_BYTES = 900_000;
 const encoder = new TextEncoder();
@@ -35,86 +34,6 @@ function configured(
   env: Env,
 ): env is Env & { DB: D1Database; APP_PASSWORD: string } {
   return Boolean(env.DB && env.APP_PASSWORD && env.APP_PASSWORD.length >= 12);
-}
-
-function base64url(bytes: Uint8Array) {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-function unbase64url(value: string) {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("Invalid session");
-  return Uint8Array.from(
-    atob(value.replace(/-/g, "+").replace(/_/g, "/")),
-    (c) => c.charCodeAt(0),
-  );
-}
-
-async function sessionKey(password: string) {
-  return crypto.subtle.importKey(
-    "raw",
-    encoder.encode(`seo-studio-session-v1:${password}`),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-}
-
-async function authenticated(request: Request, password: string) {
-  const value = request.headers
-    .get("Cookie")
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${COOKIE}=`))
-    ?.slice(COOKIE.length + 1);
-  if (!value || value.length > 512) return false;
-  try {
-    const [payload, signature, extra] = value.split(".");
-    if (!payload || !signature || extra) return false;
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      await sessionKey(password),
-      unbase64url(signature),
-      encoder.encode(payload),
-    );
-    if (!valid) return false;
-    const data = JSON.parse(decoder.decode(unbase64url(payload))) as {
-      expires?: unknown;
-    };
-    return (
-      typeof data.expires === "number" &&
-      data.expires > Date.now() / 1000 &&
-      data.expires <= Date.now() / 1000 + SESSION_SECONDS + 60
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function makeSession(password: string) {
-  const payload = base64url(
-    encoder.encode(
-      JSON.stringify({
-        expires: Math.floor(Date.now() / 1000) + SESSION_SECONDS,
-        nonce: crypto.randomUUID(),
-      }),
-    ),
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    await sessionKey(password),
-    encoder.encode(payload),
-  );
-  return `${payload}.${base64url(new Uint8Array(signature))}`;
-}
-
-function cookie(request: Request, value: string, maxAge = SESSION_SECONDS) {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
 }
 
 function sameOrigin(request: Request) {
@@ -197,50 +116,25 @@ export function chunkJSON(serialized: string): string[] {
   return chunks;
 }
 
-async function login(
-  request: Request,
-  env: Env & { DB: D1Database; APP_PASSWORD: string },
-) {
-  const input = await readJSON(request, 4096);
-  if (
-    !record(input) ||
-    typeof input.password !== "string" ||
-    input.password.length > 1024
-  )
-    return json({ error: "INVALID_REQUEST" }, 400);
+async function rateLimit(request: Request, db: D1Database) {
   const now = Math.floor(Date.now() / 1000);
   const ip = request.headers.get("CF-Connecting-IP") || "local-development";
-  const ipHash = base64url(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(ip))),
-  );
-  const attempt = await env.DB.prepare(
+  const ipHash = base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(ip))));
+  const attempt = await db.prepare(
     "INSERT INTO seo_login_attempts (ip_hash, attempts, window_start) VALUES (?, 1, ?) ON CONFLICT(ip_hash) DO UPDATE SET attempts = CASE WHEN window_start <= ? THEN 1 ELSE attempts + 1 END, window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END WHERE attempts <= 10 OR window_start <= ? RETURNING attempts",
-  )
-    .bind(ipHash, now, now - 900, now - 900, now, now - 900)
-    .first<{ attempts: number }>();
-  if (!attempt || attempt.attempts > 10)
-    return json({ error: "TOO_MANY_ATTEMPTS" }, 429, { "Retry-After": "900" });
-  const supplied = await crypto.subtle.digest(
-    "SHA-256",
-    encoder.encode(input.password),
-  );
-  const expected = await crypto.subtle.digest(
-    "SHA-256",
-    encoder.encode(env.APP_PASSWORD),
-  );
-  const a = new Uint8Array(supplied),
-    b = new Uint8Array(expected);
-  let difference = 0;
-  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
-  if (difference !== 0) return json({ error: "INVALID_PASSWORD" }, 401);
-  await env.DB.prepare(
-    "DELETE FROM seo_login_attempts WHERE ip_hash = ? OR window_start < ?",
-  )
-    .bind(ipHash, now - 86400)
-    .run();
-  return json({ authenticated: true }, 200, {
-    "Set-Cookie": cookie(request, await makeSession(env.APP_PASSWORD)),
-  });
+  ).bind(ipHash, now, now - 900, now - 900, now, now - 900).first<{ attempts: number }>();
+  if (!attempt || attempt.attempts > 10) throw new AuthError(429, "TOO_MANY_ATTEMPTS");
+  return async () => {
+    await db.prepare("DELETE FROM seo_login_attempts WHERE ip_hash = ? OR window_start < ?").bind(ipHash, now - 86400).run();
+  };
+}
+
+async function login(request: Request, env: Env & { DB: D1Database; APP_PASSWORD: string }) {
+  const input = await readJSON(request, 4096);
+  const complete = await rateLimit(request, env.DB);
+  const { token, ...session } = await new Accounts(env.DB, env.APP_PASSWORD).login(input);
+  await complete();
+  return json({ authenticated: true, ...session }, 200, { "Set-Cookie": cookie(request, token) });
 }
 
 async function getState(db: D1Database) {
@@ -345,30 +239,41 @@ async function handle(request: Request, env: Env) {
       headers,
     });
   }
-  if (path === "/api/status" && request.method === "GET")
-    return json({
-      configured: configured(env),
-      authenticated:
-        configured(env) && (await authenticated(request, env.APP_PASSWORD)),
-    });
+  if (path === "/api/status" && request.method === "GET") {
+    if (!configured(env)) return json({ configured: false, authenticated: false });
+    const accounts = new Accounts(env.DB, env.APP_PASSWORD);
+    await accounts.ready();
+    const session = await accounts.authenticate(request);
+    return json({ configured: true, authenticated: Boolean(session), ...(session || {}) });
+  }
   if (!configured(env)) return json({ error: "CLOUD_NOT_CONFIGURED" }, 503);
-  if (
-    ["POST", "PUT", "PATCH", "DELETE"].includes(request.method) &&
-    !sameOrigin(request)
-  )
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && !sameOrigin(request))
     return json({ error: "ORIGIN_DENIED" }, 403);
-  if (path === "/api/login" && request.method === "POST")
-    return login(request, env);
+  if (path === "/api/login" && request.method === "POST") return login(request, env);
   if (path === "/api/logout" && request.method === "POST")
-    return json({ authenticated: false }, 200, {
-      "Set-Cookie": cookie(request, "", 0),
-    });
-  if (!(await authenticated(request, env.APP_PASSWORD)))
-    return json({ error: "UNAUTHORIZED" }, 401);
-  if (path === "/api/state" && request.method === "GET")
-    return getState(env.DB);
-  if (path === "/api/state" && request.method === "PUT")
+    return json({ authenticated: false }, 200, { "Set-Cookie": cookie(request, "", 0) });
+  const accounts = new Accounts(env.DB, env.APP_PASSWORD);
+  const session = await accounts.authenticate(request);
+  if (!session) return json({ error: "UNAUTHORIZED" }, 401);
+  if (path === "/api/me" && request.method === "GET") return json(session);
+  if (path === "/api/password" && request.method === "POST") {
+    const input = await readJSON(request, 4096);
+    const complete = await rateLimit(request, env.DB);
+    const { token, ...changed } = await accounts.changePassword(session.user.id, input);
+    await complete();
+    return json(changed, 200, { "Set-Cookie": cookie(request, token) });
+  }
+  if (path === "/api/users" || /^\/api\/users\/[^/]+$/.test(path)) {
+    if (session.user.role !== "owner") return json({ error: "FORBIDDEN" }, 403);
+    if (path === "/api/users" && request.method === "GET") return json({ users: await accounts.list() });
+    if (path === "/api/users" && request.method === "POST") return json({ user: await accounts.create(await readJSON(request, 4096)) }, 201);
+    if (path.startsWith("/api/users/") && request.method === "PATCH") return json({ user: await accounts.update(decodeURIComponent(path.slice("/api/users/".length)), await readJSON(request, 4096)) });
+  }
+  if (path === "/api/state" && request.method === "GET") return getState(env.DB);
+  if (path === "/api/state" && request.method === "PUT") {
+    if (session.user.role === "viewer") return json({ error: "FORBIDDEN" }, 403);
     return putState(request, env.DB);
+  }
   return json({ error: "NOT_FOUND" }, 404);
 }
 
@@ -377,8 +282,8 @@ export default {
     try {
       return await handle(request, env);
     } catch (error) {
-      if (error instanceof RequestError)
-        return json({ error: error.code }, error.status);
+      if (error instanceof RequestError || error instanceof AuthError)
+        return json({ error: error.code }, error.status, error.status === 429 ? { "Retry-After": "900" } : {});
       return json({ error: "SERVICE_UNAVAILABLE" }, 503);
     }
   },

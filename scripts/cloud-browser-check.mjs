@@ -1,16 +1,13 @@
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 const base = process.env.CLOUD_TEST_URL || "http://localhost:8787";
 if (!['localhost', '127.0.0.1'].includes(new URL(base).hostname)) throw new Error('Cloud integration tests replace data; only a local test Worker is allowed.');
-const password = (
-  await readFile(
-    process.env.CLOUD_TEST_VARS || "/tmp/rooyesh-full/.dev.vars",
-    "utf8",
-  )
-)
-  .split("APP_PASSWORD=")[1]
-  .trim();
+const variables = await readFile(process.env.CLOUD_TEST_VARS || "/tmp/rooyesh-full/.dev.vars", "utf8");
+const rawPassword = variables.match(/^APP_PASSWORD=(.+)$/m)?.[1]?.trim();
+if (!rawPassword) throw new Error("A disposable local APP_PASSWORD is required.");
+const password = rawPassword.startsWith('"') ? JSON.parse(rawPassword) : rawPassword.replace(/^'|'$/g, "");
+await mkdir("artifacts", { recursive: true });
 const browser = await chromium.launch({
   executablePath: "/usr/bin/chromium",
   headless: true,
@@ -63,15 +60,16 @@ async function local() {
 }
 try {
   await page.goto(base);
+  await page.locator("#auth-username").waitFor();
+  await page.locator("#auth-username").fill("alireza");
+  await page.locator("#auth-password").fill(password);
+  await page.locator(".auth-remember input").check();
+  await page.getByRole("button", { name: "ورود به استودیو", exact: true }).click();
   await page.waitForSelector(".hero-card");
   await nav("تنظیمات و راهنما");
   await page.getByLabel("نام پروژه", { exact: true }).fill("نسخه دستگاه اول");
   await page
     .getByRole("button", { name: "پشتیبان و فضای ابری", exact: true })
-    .click();
-  await page.getByLabel("رمز فضای ابری").fill(password);
-  await page
-    .getByRole("button", { name: "اتصال به فضای ابری", exact: true })
     .click();
   await page
     .getByRole("button", { name: "ارسال نسخه این دستگاه", exact: true })
@@ -205,27 +203,15 @@ try {
   check("Offline local edits automatically sync after connectivity returns");
   const device = await browser.newContext();
   const second = await device.newPage();
+  second.on("pageerror", (error) => errors.push(error.message));
   await second.goto(base);
+  await second.locator("#auth-username").waitFor();
+  await second.locator("#auth-username").fill("alireza");
+  await second.locator("#auth-password").fill(password);
+  await second.getByRole("button", { name: "ورود به استودیو", exact: true }).click();
   await second.waitForSelector(".hero-card");
-  await second
-    .locator(".sidebar .nav-item")
-    .filter({ hasText: "تنظیمات و راهنما" })
-    .click();
-  await second
-    .getByRole("button", { name: "پشتیبان و فضای ابری", exact: true })
-    .click();
-  await second.getByLabel("رمز فضای ابری").fill(password);
-  await second
-    .getByRole("button", { name: "اتصال به فضای ابری", exact: true })
-    .click();
-  second.on("dialog", (d) => d.accept());
-  await second
-    .getByRole("button", { name: "دریافت نسخه ابری", exact: true })
-    .click();
-  await second.waitForTimeout(900);
-  await second
-    .getByRole("button", { name: "پروژه و تنظیمات", exact: true })
-    .click();
+  await second.locator(".sidebar .nav-item").filter({ hasText: "تنظیمات و راهنما" }).click();
+  // A fresh authenticated device receives cloud state during workspace startup.
   assert.equal(
     await second.getByLabel("هدف سئو", { exact: true }).inputValue(),
     "ویرایش آفلاین برای همگام‌سازی",
@@ -237,7 +223,7 @@ try {
   await writeFile(
     "artifacts/cloud-browser-checks.json",
     JSON.stringify(
-      { passed: checks.length, checks, productionDeployed: false },
+      { passed: checks.length, completed: true, checks, productionDeployed: false },
       null,
       2,
     ),
@@ -248,6 +234,7 @@ try {
     path: "artifacts/cloud-browser-failure.png",
     fullPage: true,
   });
+  await writeFile("artifacts/cloud-browser-checks.json", JSON.stringify({ passed: checks.length, completed: false, checks, errors, failure: e instanceof Error ? e.message : String(e), productionDeployed: false }, null, 2));
   process.exitCode = 1;
 } finally {
   await browser.close();

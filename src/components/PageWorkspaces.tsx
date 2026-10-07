@@ -26,6 +26,8 @@ import {
   normalizeKeyword,
 } from "../domain";
 import type { Field, Row, WorkspaceProps } from "../types";
+import { formatDate, getJalaliParts, JALALI_MONTHS, JALALI_WEEKDAYS, jalaliMonthGrid, todayIso, toIsoDate } from "../dates";
+import { JalaliDateInput } from "./JalaliDateInput";
 import "./page-workspaces.css";
 
 type WorkspaceKind = "pages" | "content" | "results";
@@ -173,16 +175,7 @@ function Chip({ value }: { value: unknown }) {
   );
 }
 function dateText(value: unknown) {
-  const str = text(value);
-  if (!str) return "بدون تاریخ";
-  const date = new Date(`${str.slice(0, 10)}T12:00:00`);
-  return Number.isNaN(date.getTime())
-    ? str
-    : new Intl.DateTimeFormat("fa-IR", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      }).format(date);
+  return value ? formatDate(value) : "بدون تاریخ";
 }
 function nextContent(row: Row, linkedPage?: Row) {
   if (!row.targetPage || !linkedPage) return "صفحه هدف را مشخص کنید";
@@ -302,6 +295,7 @@ function RowWorkspace({
   onRowsChange,
   notify,
   kind,
+  readOnly = false,
 }: WorkspaceProps & { kind: WorkspaceKind }) {
   const rows = project[kind];
   const info = config[kind];
@@ -317,6 +311,7 @@ function RowWorkspace({
   const [error, setError] = useState("");
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
   const [calendar, setCalendar] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => getJalaliParts(todayIso())!);
   const [bulkStatus, setBulkStatus] = useState("");
   const [comparison, setComparison] = useState(false);
   const pageMap = useMemo(() => {
@@ -469,6 +464,7 @@ function RowWorkspace({
     setError("");
   };
   const save = () => {
+    if (readOnly) return;
     if (!draft) return;
     if (creating && rows.length >= ROW_LIMIT) {
       setError(
@@ -554,6 +550,7 @@ function RowWorkspace({
     notify(`${info.singular} ${creating ? "اضافه" : "به‌روزرسانی"} شد.`);
   };
   const remove = () => {
+    if (readOnly) return;
     const ids = new Set(deleteIds);
     onRowsChange(
       kind,
@@ -586,6 +583,7 @@ function RowWorkspace({
       return next;
     });
   const applyBulkStatus = () => {
+    if (readOnly) return;
     if (!bulkStatus) return;
     onRowsChange(
       kind,
@@ -782,13 +780,24 @@ function RowWorkspace({
   const calendarGroups = useMemo(() => {
     const groups = new Map<string, Row[]>();
     filtered.forEach((row) => {
-      const key = text(row.publishDate) || "undated";
+      const date = toIsoDate(text(row.publishDate)) || "";
+      const parts = getJalaliParts(date);
+      if (parts && (parts.year !== calendarMonth.year || parts.month !== calendarMonth.month)) return;
+      const key = parts ? date : "undated";
       groups.set(key, [...(groups.get(key) || []), row]);
     });
     return [...groups.entries()].sort(([a], [b]) =>
       a === "undated" ? 1 : b === "undated" ? -1 : a.localeCompare(b),
     );
-  }, [filtered]);
+  }, [filtered, calendarMonth.year, calendarMonth.month]);
+  const calendarByDate = new Map(calendarGroups);
+  const moveCalendarMonth = (delta: number) => {
+    let year = calendarMonth.year, month = calendarMonth.month + delta;
+    if (month < 1) { year--; month = 12; }
+    if (month > 12) { year++; month = 1; }
+    if (year < 1 || year > 3177) return;
+    setCalendarMonth({ year, month, day: 1 });
+  };
   return (
     <section className={`workspace page-workspace workspace-${kind}`}>
       <div className="workspace-heading">
@@ -802,7 +811,7 @@ function RowWorkspace({
         </div>
         <button
           className="btn btn-primary"
-          disabled={rows.length >= ROW_LIMIT}
+          disabled={readOnly || rows.length >= ROW_LIMIT}
           title={
             rows.length >= ROW_LIMIT
               ? "سقف تعداد رکوردهای این پروژه پر شده است"
@@ -974,7 +983,7 @@ function RowWorkspace({
           </select>
           <button
             className="btn btn-secondary"
-            disabled={!bulkStatus}
+            disabled={readOnly || !bulkStatus}
             onClick={applyBulkStatus}
           >
             اعمال
@@ -1017,7 +1026,7 @@ function RowWorkspace({
               پاک کردن فیلترها
             </button>
           ) : (
-            <button className="btn btn-primary" onClick={create}>
+            <button disabled={readOnly} className="btn btn-primary" onClick={create}>
               <Plus size={16} />
               {info.button}
             </button>
@@ -1025,8 +1034,27 @@ function RowWorkspace({
         </div>
       ) : calendar && kind === "content" ? (
         <div className="content-calendar">
+          <div className="shamsi-calendar-toolbar">
+            <div>
+              <button type="button" className="icon-btn" aria-label="ماه قبل تقویم محتوا" onClick={() => moveCalendarMonth(-1)}><ChevronRight size={18}/></button>
+              <h3>{JALALI_MONTHS[calendarMonth.month - 1]} {fa.format(calendarMonth.year).replace(/٬/g, "")}</h3>
+              <button type="button" className="icon-btn" aria-label="ماه بعد تقویم محتوا" onClick={() => moveCalendarMonth(1)}><ChevronLeft size={18}/></button>
+            </div>
+            <button type="button" className="btn btn-secondary" onClick={() => setCalendarMonth(getJalaliParts(todayIso())!)}>ماه جاری</button>
+          </div>
+          <div className="shamsi-content-grid" aria-label="تقویم ماهانه شمسی محتوا">
+            {JALALI_WEEKDAYS.map((day) => <div className="shamsi-weekday" key={day}>{day}</div>)}
+            {jalaliMonthGrid(calendarMonth.year, calendarMonth.month).map((day, index) => <div key={day?.iso || `blank-${index}`} className={`shamsi-content-day ${day?.weekday === 6 ? "friday" : ""} ${day?.iso === todayIso() ? "today" : ""}`}>
+              {day && <>
+                <span>{fa.format(day.day)}</span>
+                {(calendarByDate.get(day.iso) || []).slice(0, 3).map((row) => <button type="button" key={row.id} title={text(row.topic)} onClick={() => edit(row)}>{text(row.topic) || "بدون موضوع"}</button>)}
+                {(calendarByDate.get(day.iso)?.length || 0) > 3 && <button type="button" onClick={() => document.getElementById(`calendar-${day.iso}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>+ {fa.format(calendarByDate.get(day.iso)!.length - 3)} محتوای دیگر</button>}
+              </>}
+            </div>)}
+          </div>
+          {!calendarGroups.some(([date]) => date !== "undated") && <p className="muted">برای این ماه محتوایی زمان‌بندی نشده است. با دکمه‌های ماه قبل و بعد، برنامه ماه‌های دیگر را ببینید.</p>}
           {calendarGroups.map(([date, items]) => (
-            <section className="calendar-date-group" key={date}>
+            <section className="calendar-date-group" key={date} id={`calendar-${date}`}>
               <div className="calendar-date-label">
                 <CalendarDays size={19} />
                 <h3>
@@ -1130,6 +1158,7 @@ function RowWorkspace({
                           <ArrowUpRight size={17} />
                         </button>
                         <button
+                          disabled={readOnly}
                           className="icon-button delete-row-button"
                           onClick={() => setDeleteIds([row.id])}
                           aria-label={`حذف ${text(row.target || row.topic || resolvePage(row)?.target || row.id)}`}
@@ -1178,6 +1207,7 @@ function RowWorkspace({
         <RowDrawer
           key={draft.id}
           draft={draft}
+          readOnly={readOnly}
           setDraft={setDraft}
           kind={kind}
           settings={settings}
@@ -1308,6 +1338,7 @@ function RowDrawer({
   onClose,
   nextAction,
   resolvePage,
+  readOnly,
 }: {
   draft: Row;
   setDraft: (row: Row) => void;
@@ -1320,6 +1351,7 @@ function RowDrawer({
   onClose: () => void;
   nextAction: string;
   resolvePage: (row: Row) => Row | undefined;
+  readOnly: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const original = useRef(rowFingerprint(draft));
@@ -1432,15 +1464,15 @@ function RowDrawer({
             onChange={(event) => inputChange(field.key, event.target.value)}
             placeholder={field.hint}
           />
+        ) : field.type === "date" ? (
+          <JalaliDateInput id={id} value={text(value)} onChange={(iso) => inputChange(field.key, iso)} aria-label={field.label}/>
         ) : (
           <input
             id={id}
             type={
               field.type === "number"
                 ? "number"
-                : field.type === "date"
-                  ? "date"
-                  : "text"
+                : "text"
             }
             value={text(value)}
             onChange={(event) =>
@@ -1544,7 +1576,7 @@ function RowDrawer({
             onSave();
           }}
         >
-          <div className="drawer-body">
+          <div className="drawer-body"><fieldset className="readonly-fields" disabled={readOnly}>
             <div className="drawer-next-action">
               <span>
                 <ArrowUpRight size={17} />
@@ -1686,7 +1718,7 @@ function RowDrawer({
                 {error}
               </p>
             )}
-          </div>
+          </fieldset></div>
           <div className="drawer-footer">
             <span className="muted">تغییرات با ذخیره ثبت می‌شوند.</span>
             <div>
@@ -1697,7 +1729,7 @@ function RowDrawer({
               >
                 انصراف
               </button>
-              <button className="btn btn-primary" type="submit">
+              <button disabled={readOnly} className="btn btn-primary" type="submit">
                 <Check size={17} />
                 ذخیره {config[kind].singular}
               </button>

@@ -1,0 +1,10 @@
+.brand-personal { font-size: 20px; }
+.brand-personal small { font-size: 12px; }
+.readonly-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.sidebar { overflow-y: auto; overscroll-behavior: contain; }
+.offline-access-choice input { width: auto; margin-inline-end: 8px; }
+.offline-access-choice span { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 600px) {
+  .topbar-actions { gap: 7px; }
+  .topbar-actions .user-avatar { display: none; }
+}
