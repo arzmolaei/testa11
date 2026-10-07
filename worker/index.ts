@@ -2,6 +2,7 @@ import { validateStore } from "../src/domain";
 import type { D1Database, Fetcher } from "@cloudflare/workers-types";
 import type { Store } from "../src/types";
 import { Accounts, AuthError, base64url, cookie } from "./auth";
+import { getHistory, MAX_CHANGE_BYTES, putChanges, RecordSyncError } from "./sync";
 
 export interface Env {
   DB?: D1Database;
@@ -270,6 +271,12 @@ async function handle(request: Request, env: Env) {
     if (path.startsWith("/api/users/") && request.method === "PATCH") return json({ user: await accounts.update(decodeURIComponent(path.slice("/api/users/".length)), await readJSON(request, 4096)) });
   }
   if (path === "/api/state" && request.method === "GET") return getState(env.DB);
+  if (path === "/api/history" && request.method === "GET")
+    return getHistory(env.DB, new URL(request.url).searchParams.get("projectId") || "");
+  if (path === "/api/changes" && request.method === "POST") {
+    if (session.user.role === "viewer") return json({ error: "FORBIDDEN" }, 403);
+    return putChanges(env.DB, await readJSON(request, MAX_CHANGE_BYTES), session.user);
+  }
   if (path === "/api/state" && request.method === "PUT") {
     if (session.user.role === "viewer") return json({ error: "FORBIDDEN" }, 403);
     return putState(request, env.DB);
@@ -282,7 +289,7 @@ export default {
     try {
       return await handle(request, env);
     } catch (error) {
-      if (error instanceof RequestError || error instanceof AuthError)
+      if (error instanceof RequestError || error instanceof AuthError || error instanceof RecordSyncError)
         return json({ error: error.code }, error.status, error.status === 429 ? { "Retry-After": "900" } : {});
       return json({ error: "SERVICE_UNAVAILABLE" }, 503);
     }

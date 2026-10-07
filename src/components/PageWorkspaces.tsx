@@ -28,6 +28,7 @@ import {
 import type { Field, Row, WorkspaceProps } from "../types";
 import { formatDate, getJalaliParts, JALALI_MONTHS, JALALI_WEEKDAYS, jalaliMonthGrid, todayIso, toIsoDate } from "../dates";
 import { JalaliDateInput } from "./JalaliDateInput";
+import { buildBrief } from "../workflow";
 import "./page-workspaces.css";
 
 type WorkspaceKind = "pages" | "content" | "results";
@@ -296,6 +297,9 @@ function RowWorkspace({
   notify,
   kind,
   readOnly = false,
+  focusRowId,
+  onFocusHandled,
+  onNavigate,
 }: WorkspaceProps & { kind: WorkspaceKind }) {
   const rows = project[kind];
   const info = config[kind];
@@ -307,6 +311,7 @@ function RowWorkspace({
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [draft, setDraft] = useState<Row | null>(null);
+  const draftBaseline = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
@@ -379,6 +384,15 @@ function RowWorkspace({
     setPriorityFilter("");
     setPage(1);
   }, [project.id, kind]);
+  useEffect(() => {
+    if (!focusRowId) return;
+    const row = rows.find((item) => item.id === focusRowId);
+    if (row) { setDraft({ ...row }); setCreating(false); setError(""); }
+    onFocusHandled?.();
+  }, [focusRowId, rows, onFocusHandled]);
+  useEffect(() => {
+    draftBaseline.current = draft && !creating ? rowFingerprint(rows.find((row) => row.id === draft.id) || { id: draft.id }) : null;
+  }, [draft?.id, creating]);
   useEffect(() => {
     setPage(1);
   }, [query, filter, priorityFilter, sortKey, sortDirection]);
@@ -463,9 +477,18 @@ function RowWorkspace({
     setCreating(true);
     setError("");
   };
+  const commitRows = (next: Row[]) => {
+    if (readOnly) return false;
+    try { return onRowsChange(kind, next) !== false; }
+    catch (cause) { notify(cause instanceof Error ? cause.message : "ذخیره انجام نشد؛ پیش‌نویس و انتخاب‌ها حفظ شده‌اند."); return false; }
+  };
   const save = () => {
     if (readOnly) return;
     if (!draft) return;
+    if (!creating && rowFingerprint(rows.find((row) => row.id === draft.id) || { id: "deleted" }) !== draftBaseline.current) {
+      setError("این رکورد هم‌زمان تغییر کرده است. متن خود را کپی کنید و پنل را دوباره باز کنید.");
+      return;
+    }
     if (creating && rows.length >= ROW_LIMIT) {
       setError(
         `سقف ${fa.format(ROW_LIMIT)} ${info.singular} برای این پروژه پر شده است. یک مورد را حذف کنید و دوباره تلاش کنید.`,
@@ -540,22 +563,18 @@ function RowWorkspace({
         typeof value === "string" ? value.trim() : value,
       ]),
     ) as Row;
-    onRowsChange(
-      kind,
+    if (!commitRows(
       creating
         ? [...rows, clean]
         : rows.map((row) => (row.id === draft.id ? clean : row)),
-    );
+    )) return;
     setDraft(null);
     notify(`${info.singular} ${creating ? "اضافه" : "به‌روزرسانی"} شد.`);
   };
   const remove = () => {
     if (readOnly) return;
     const ids = new Set(deleteIds);
-    onRowsChange(
-      kind,
-      rows.filter((row) => !ids.has(row.id)),
-    );
+    if (!commitRows(rows.filter((row) => !ids.has(row.id)))) return;
     setSelected(
       (current) => new Set([...current].filter((id) => !ids.has(id))),
     );
@@ -573,7 +592,10 @@ function RowWorkspace({
           deleteIds.includes(
             pageMap.get(text(row.pageId))?.id || text(row.pageId),
           ),
-        ).length
+        ).length +
+        project.keywords.filter((row) => deleteIds.includes(text(row.targetPage))).length +
+        (project.tasks || []).filter((row) => deleteIds.includes(text(row.pageId))).length +
+        (project.links || []).filter((row) => deleteIds.includes(text(row.fromPageId)) || deleteIds.includes(text(row.toPageId))).length
       : 0;
   const toggleAll = () =>
     setSelected((current) => {
@@ -585,12 +607,11 @@ function RowWorkspace({
   const applyBulkStatus = () => {
     if (readOnly) return;
     if (!bulkStatus) return;
-    onRowsChange(
-      kind,
+    if (!commitRows(
       rows.map((row) =>
         selected.has(row.id) ? { ...row, [info.filter]: bulkStatus } : row,
       ),
-    );
+    )) return;
     notify(
       `وضعیت ${fa.format(selectedIds.length)} ${info.singular} تغییر کرد.`,
     );
@@ -1218,6 +1239,8 @@ function RowWorkspace({
           onClose={() => setDraft(null)}
           nextAction={nextAction(draft)}
           resolvePage={resolvePage}
+          onNavigate={onNavigate}
+          notify={notify}
         />
       )}
       {deleteIds.length > 0 && (
@@ -1339,6 +1362,8 @@ function RowDrawer({
   nextAction,
   resolvePage,
   readOnly,
+  onNavigate,
+  notify,
 }: {
   draft: Row;
   setDraft: (row: Row) => void;
@@ -1352,6 +1377,8 @@ function RowDrawer({
   nextAction: string;
   resolvePage: (row: Row) => Row | undefined;
   readOnly: boolean;
+  onNavigate?: WorkspaceProps["onNavigate"];
+  notify: (message: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const original = useRef(rowFingerprint(draft));
@@ -1576,7 +1603,23 @@ function RowDrawer({
             onSave();
           }}
         >
-          <div className="drawer-body"><fieldset className="readonly-fields" disabled={readOnly}>
+          <div className="drawer-body">
+            {kind === "pages" && !creating && <section className="page-connections">
+              <h3>فضای کار این صفحه</h3>
+              <p>کلمات، محتوا و نتایج مرتبط با همین شناسهٔ ثابت صفحه.</p>
+              <nav>
+                <button type="button" disabled={readOnly} onClick={() => {
+                  const proposal = buildBrief(project, draft); const next = { ...draft }; let count = 0;
+                  for (const [key, value] of Object.entries(proposal)) if (!text(next[key]) && text(value)) { next[key] = value; count++; }
+                  if (count) { setDraft(next); notify("بریف پیشنهادی در خانه‌های خالی آماده شد؛ بررسی و ذخیره کنید."); }
+                  else notify("خانه‌های بریف از قبل تکمیل‌اند؛ اطلاعات دستی حفظ شد.");
+                }}>آماده‌سازی بریف در خانه‌های خالی</button>
+                {project.content.filter((row) => row.targetPage === draft.id).slice(0, 5).map((row) => <button type="button" key={row.id} onClick={() => onNavigate?.("content", row.id)}>محتوا: {text(row.topic) || "بدون عنوان"}</button>)}
+                {project.results.filter((row) => row.pageId === draft.id || row.pageId && row.pageId === draft.pageId).slice(0, 3).map((row) => <button type="button" key={row.id} onClick={() => onNavigate?.("results", row.id)}>نتایج این صفحه</button>)}
+              </nav>
+              <details><summary>کلمات متصل به صفحه ({fa.format(project.keywords.filter((row) => row.targetPage === draft.id).length)})</summary><div className="connection-list">{project.keywords.filter((row) => row.targetPage === draft.id).slice(0, 100).map((row) => <button type="button" key={row.id} onClick={() => onNavigate?.("keywords", row.id)}>{text(row.keyword)}</button>)}</div></details>
+            </section>}
+            <fieldset className="readonly-fields" disabled={readOnly}>
             <div className="drawer-next-action">
               <span>
                 <ArrowUpRight size={17} />
@@ -1782,7 +1825,7 @@ function ConfirmDelete({
         </p>
         {linkedCount > 0 && (
           <p className="form-error">
-            {fa.format(linkedCount)} محتوا یا نتیجه به این صفحات متصل است. آن
+            {fa.format(linkedCount)} رکورد به این صفحات متصل است. آن
             رکوردها حفظ می‌شوند و باید صفحه هدف آن‌ها را دوباره انتخاب کنید.
           </p>
         )}

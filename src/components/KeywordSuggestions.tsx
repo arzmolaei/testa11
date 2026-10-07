@@ -14,7 +14,8 @@ type Props = WorkspaceProps & {
 const number = (value: number) => value.toLocaleString("fa-IR");
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
-export function KeywordSuggestions({ project, onRowsChange, notify, selectedIds = EMPTY_SELECTION, applyLabel = "اعمال پیشنهادها", disabled = false }: Props) {
+export function KeywordSuggestions({ project, onRowsChange, notify, selectedIds = EMPTY_SELECTION, applyLabel = "اعمال پیشنهادها", disabled: externallyDisabled = false, readOnly = false }: Props) {
+  const disabled = externallyDisabled || readOnly;
   const titleId = useId();
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState<"all" | "selected">("all");
@@ -94,7 +95,10 @@ export function KeywordSuggestions({ project, onRowsChange, notify, selectedIds 
   function apply() {
     if (!preview || disabled) return;
     const result = applyKeywordSuggestions(project.keywords, preview, { excludedGroups: excluded, labels });
-    if (result.changed) onRowsChange("keywords", result.rows);
+    if (result.changed) {
+      try { if (onRowsChange("keywords", result.rows) === false) return; }
+      catch (error) { notify(error instanceof Error ? error.message : "پیشنهادها ثبت نشد؛ پیش‌نمایش و انتخاب‌ها حفظ شده‌اند."); return; }
+    }
     notify(result.changed
       ? `${number(result.changed)} کلمه به‌روزرسانی شد: ${number(result.groupChanges)} گروه و ${number(result.intentChanges)} نیت.${result.skipped ? ` ${number(result.skipped)} کلمه به دلیل تغییر هم‌زمان کنار گذاشته شد.` : ""}`
       : "تغییری برای اعمال وجود ندارد.");

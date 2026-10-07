@@ -104,7 +104,7 @@ export function validateBulkRows(collection: Collection, rows: Row[], editedIds:
     if (editedIds.has(row.id)) {
       if (required && !String(row[required] ?? "").trim()) return `${requiredLabel} نمی‌تواند خالی باشد.`;
       if (collection === "results" && !row.pageId && !String(row.url ?? "").trim()) return "برای نتیجه، صفحه مرتبط یا URL وارد کنید.";
-      const linkKey = collection === "content" ? "targetPage" : collection === "results" ? "pageId" : "";
+      const linkKey = collection === "content" || collection === "keywords" ? "targetPage" : collection === "results" ? "pageId" : "";
       if (pages !== undefined && linkKey && row[linkKey] && !pageMap.has(String(row[linkKey])))
         return "صفحه مرتبط معتبر نیست؛ صفحه را از فهرست صفحات انتخاب کنید.";
     }

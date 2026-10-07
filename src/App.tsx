@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpLeft,
   ArrowLeft,
@@ -38,14 +38,8 @@ import {
   createProject,
   demoStore,
   LISTS,
-  nextKeyword,
-  nextPage,
   SCHEMAS,
   summarize,
-  keywordLookup,
-  resultLookup,
-  normalizeKeyword,
-  duplicates,
   validateStore,
 } from "./domain";
 import {
@@ -65,11 +59,40 @@ import { useTheme } from "./theme";
 import { formatDate, todayIso, jalaliFileDate } from "./dates";
 import { JalaliDateInput } from "./components/JalaliDateInput";
 import { cloudResumeDecision, fingerprintStore, readCloudLink, rememberCloudLink, forgetCloudLink } from "./cloud-link";
+import type { ProjectPlaybook } from "./playbooks";
+import { PROJECT_PLAYBOOKS, cloneProjectPlaybook } from "./playbooks";
+import { applyChangeSet, buildChangeSet, loadCloudBase, saveCloudBase, clearCloudBase } from "./record-sync";
+import "./intelligence.css";
 import {
   PageWorkspace,
   ContentWorkspace,
   ResultsWorkspace,
 } from "./components/PageWorkspaces";
+const PagePlanner = lazy(() => import("./components/PagePlanner").then((module) => ({ default: module.PagePlanner })));
+const ProjectAssistant = lazy(() => import("./components/ProjectAssistant").then((module) => ({ default: module.ProjectAssistant })));
+const PageRelationships = lazy(() => import("./components/PageRelationships").then((module) => ({ default: module.PageRelationships })));
+const SearchConsoleWorkspace = lazy(() => import("./components/SearchConsoleWorkspace").then((module) => ({ default: module.SearchConsoleWorkspace })));
+const ProjectReport = lazy(() => import("./components/ProjectReport").then((module) => ({ default: module.ProjectReport })));
+const PlaybookPicker = lazy(() => import("./components/PlaybookPicker").then((module) => ({ default: module.PlaybookPicker })));
+const ProjectHistory = lazy(() => import("./components/ProjectHistory").then((module) => ({ default: module.ProjectHistory })));
+
+function stampProject(previous: Project, incoming: Project): Project {
+  const result = { ...incoming };
+  const now = new Date().toISOString();
+  for (const key of ["keywords", "pages", "content", "results", "tasks", "links"] as const) {
+    if (!incoming[key]) continue;
+    const old = new Map((previous[key] || []).map((row) => [row.id, row]));
+    result[key] = incoming[key]!.map((row) => {
+      const before = old.get(row.id);
+      if (before && JSON.stringify(before) === JSON.stringify(row)) return row;
+      return { ...row, createdAt: row.createdAt || before?.createdAt || now, updatedAt: now };
+    });
+  }
+  return result;
+}
+function WorkspaceModes({ items, value, onChange }: { items: [string, string][]; value: string; onChange: (key: string) => void }) {
+  return <nav className="workspace-modes" aria-label="نمای بخش">{items.map(([key, label]) => <button key={key} className={value === key ? "active" : ""} aria-pressed={value === key} onClick={() => onChange(key)}>{label}</button>)}</nav>;
+}
 
 type View = "start" | Collection | "settings" | "bulk";
 const NAV = [
@@ -104,6 +127,10 @@ const dateLabel = () =>
     year: "numeric",
     timeZone: "Asia/Tehran",
   });
+class CloudRequestError extends Error {
+  code: string;
+  constructor(code: string, message: string) { super(message); this.code = code; }
+}
 async function api(path: string, body?: unknown, method?: string) {
   const r = await fetch("/api/" + path, {
     signal: AbortSignal.timeout(20000),
@@ -119,11 +146,7 @@ async function api(path: string, body?: unknown, method?: string) {
   }
   if (!r.ok) {
     if (r.status === 401) window.dispatchEvent(new Event("seo:auth-expired"));
-    throw new Error(
-      r.status === 409
-        ? "نسخه ابری تغییر کرده؛ همگام‌سازی متوقف شد. ابتدا نسخه ابری را دریافت کنید."
-        : ({ FORBIDDEN: "حساب شما اجازهٔ این تغییر را ندارد.", AUTH_REQUIRED: "برای ادامه دوباره وارد شوید.", TEAM_MIGRATION_REQUIRED: "نسخهٔ جدید دیتابیس باید با نصب‌کننده آماده شود.", TOO_MANY_ATTEMPTS: "تلاش‌های ورود زیاد است؛ کمی بعد دوباره امتحان کنید." } as Record<string, string>)[payload.error] ?? payload.error ?? "ارتباط با ابر انجام نشد.",
-    );
+    throw new CloudRequestError(String(payload.error || ""), ({ RECORD_CONFLICT: "یک فیلد هم‌زمان در دستگاه دیگری تغییر کرده است. تغییرات این دستگاه حفظ شدند؛ در تنظیمات پشتیبان و نسخهٔ ابری را بررسی کنید.", REVISION_CONFLICT: "نسخه ابری تغییر کرده؛ همگام‌سازی متوقف شد. ابتدا نسخه ابری را بررسی کنید.", STATE_REQUIRED: "فضای ابری خالی است؛ از تنظیمات، انتقال اولیه به ابر را انجام دهید.", RECORD_SYNC_MIGRATION_REQUIRED: "دیتابیس به به‌روزرسانی نیاز دارد؛ نصب‌کنندهٔ آسان را دوباره اجرا کنید.", SYNC_BUSY: "ابر در حال ثبت تغییرات دیگری است؛ تغییرات محلی محفوظ‌اند. دوباره همگام‌سازی کنید.", INVALID_CHANGES: "تغییرات برای ثبت ابری معتبر نیستند؛ نسخهٔ محلی حفظ شد.", PAYLOAD_TOO_LARGE: "حجم انتقال زیاد است؛ نسخهٔ محلی محفوظ است. در تنظیمات، انتقال کامل را بررسی کنید.", FORBIDDEN: "حساب شما اجازهٔ این تغییر را ندارد.", AUTH_REQUIRED: "برای ادامه دوباره وارد شوید.", TEAM_MIGRATION_REQUIRED: "نسخهٔ جدید دیتابیس باید با نصب‌کننده آماده شود.", TOO_MANY_ATTEMPTS: "تلاش‌های ورود زیاد است؛ کمی بعد دوباره امتحان کنید." } as Record<string, string>)[payload.error] ?? (r.status === 409 ? "نسخه ابری تغییر کرده؛ همگام‌سازی متوقف شد. ابتدا نسخه ابری را بررسی کنید." : payload.error ?? "ارتباط با ابر انجام نشد."));
   }
   return payload;
 }
@@ -141,12 +164,19 @@ function initialWorkspace(localMode: boolean): Store {
 function hasDraft(): boolean {
   return Boolean(document.querySelector('[data-unsaved="true"], [data-dirty="true"]'));
 }
+function localNavigation(state: Store, activeProjectId: string): Store {
+  return state.projects.some((project) => project.id === activeProjectId) ? { ...state, activeProjectId } : state;
+}
 
 function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActions }) {
   const { theme, toggleTheme } = useTheme();
   const viewer = session.user.role === "viewer";
   const [store, setStore] = useState<Store | null>(null);
   const [view, setView] = useState<View>("start");
+  const [keywordMode, setKeywordMode] = useState("table");
+  const [pageMode, setPageMode] = useState("table");
+  const [resultsMode, setResultsMode] = useState("table");
+  const [focusRowId, setFocusRowId] = useState<string>();
   const [toast, setToast] = useState("");
   const [saveStatus, setSaveStatus] = useState("loading");
   const [online, setOnline] = useState(session.mode === "offline" || session.networkOnline === false ? false : navigator.onLine);
@@ -155,6 +185,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
   const [newProject, setNewProject] = useState(false);
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("");
+  const [newPlaybook, setNewPlaybook] = useState<ProjectPlaybook>(() => cloneProjectPlaybook(PROJECT_PLAYBOOKS[0]));
   const [cloud, setCloud] = useState({
     configured: false,
     authenticated: false,
@@ -183,6 +214,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     cloudBusy = useRef(false),
     cloudPending = useRef(false),
     cloudStateRef = useRef<Store | null>(null);
+  const cloudBase = useRef<Store | null>(null);
+  const busyRetries = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -233,8 +266,20 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
         let saved = Boolean(local);
         if (session.mode !== "local") {
           const link = readCloudLink();
+          let cached: Awaited<ReturnType<typeof loadCloudBase>> = null;
+          let cacheFailed = false;
+          try {
+            cached = await loadCloudBase(session.user.id);
+            if (cached) cloudBase.current = validateStore(cached.state);
+          } catch {
+            cacheFailed = true;
+            cached = null;
+            cloudBase.current = null;
+            setCloudError("مبنای ذخیرهٔ ابری این دستگاه قابل خواندن نیست؛ دادهٔ محلی محفوظ است. در تنظیمات پشتیبان بگیرید و نسخهٔ ابری را بررسی کنید.");
+          }
+          if (!mounted) return;
           if (session.mode === "offline") {
-            const resumed = { configured: true, authenticated: true, active: Boolean(link) && !viewer, revision: link?.revision ?? 0 };
+            const resumed = { configured: true, authenticated: true, active: !cacheFailed && Boolean(cached || link) && !viewer && ownsTab.current, revision: cached?.revision ?? link?.revision ?? 0 };
             cloudRef.current = resumed;
             setCloud(resumed);
             setCloudStatus(link ? "pending" : "local");
@@ -242,21 +287,49 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
             try {
               const remote = await api("state");
               if (!mounted) return;
-              const decision = cloudResumeDecision(local ? await fingerprintStore(state) : null, remote.revision, Boolean(remote.state), link);
+              let decision = cloudResumeDecision(local ? await fingerprintStore(state) : null, remote.revision, Boolean(remote.state), link);
+              if (cacheFailed && local && !viewer) decision = "review";
+              if (cached && cached.revision > remote.revision && local && !viewer) decision = "review";
+              const remoteState = remote.state ? validateStore(remote.state) : null;
+              const localActive = state.activeProjectId;
+              if (remoteState && viewer) decision = "cloud";
+              // The saved common base lets unrelated offline and team edits
+              // merge without choosing one device's entire workspace.
+              if (remoteState && local && cached && cached.revision <= remote.revision && !viewer) {
+                const merged = await applyChangeSet(remoteState, await buildChangeSet(cloudBase.current!, state));
+                if (!mounted) return;
+                if (!merged.conflicts.length) {
+                  state = localNavigation(validateStore(merged.state), localActive);
+                  decision = "local";
+                } else decision = "conflict";
+              }
               let active = false;
               if (decision === "cloud") {
-                state = validateStore(remote.state);
+                state = localNavigation(remoteState!, localActive);
                 if (ownsTab.current) {
                   const record = await saveLocal(state, localRevision.current, Boolean(local));
                   localRevision.current = record.revision;
                   saved = true;
-                  await rememberCloudLink(state, remote.revision);
                 }
                 active = !viewer && ownsTab.current;
               } else if (decision === "local") {
+                if (ownsTab.current) {
+                  // Commit merged foreign fields before advancing the durable
+                  // common base; a crash between those writes is then harmless.
+                  const record = await saveLocal(state, localRevision.current);
+                  localRevision.current = record.revision;
+                  saved = true;
+                }
                 active = !viewer && ownsTab.current;
               } else if (decision === "conflict") {
-                setCloudError("تغییرات آفلاین شما و نسخهٔ ابری هر دو تغییر کرده‌اند؛ نسخهٔ محلی حفظ شد. در تنظیمات، ابتدا پشتیبان بگیرید و جهت انتقال را انتخاب کنید.");
+                setCloudError("بعضی فیلدهای محلی و ابری هم‌زمان تغییر کرده‌اند؛ نسخهٔ محلی حفظ شد. در تنظیمات، ابتدا پشتیبان بگیرید و نسخهٔ ابری را بررسی کنید.");
+              }
+              if (remoteState && (decision === "cloud" || decision === "local")) {
+                cloudBase.current = remoteState;
+                if (ownsTab.current) {
+                  await saveCloudBase(remoteState, remote.revision, session.user.id);
+                  await rememberCloudLink(remoteState, remote.revision);
+                }
               }
               const resumed = { configured: true, authenticated: true, active, revision: remote.revision };
               cloudRef.current = resumed;
@@ -266,7 +339,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
               if (!mounted) return;
               if (error instanceof TypeError || (error as Error).name === "TimeoutError") setOnline(false);
               else setCloudError((error as Error).message);
-              const resumed = { configured: true, authenticated: true, active: Boolean(link) && !viewer, revision: link?.revision ?? 0 };
+              const networkFailure = error instanceof TypeError || (error as Error).name === "TimeoutError";
+              const resumed = { configured: true, authenticated: true, active: !cacheFailed && networkFailure && Boolean(cached || link) && !viewer && ownsTab.current, revision: cached?.revision ?? link?.revision ?? 0 };
               cloudRef.current = resumed;
               setCloud(resumed);
             }
@@ -335,25 +409,66 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
       return;
     }
     cloudBusy.current = true;
+    const epoch = cloudEpoch.current;
     try {
-      while (cloudPending.current) {
+      while (cloudPending.current && cloudRef.current.active && epoch === cloudEpoch.current) {
         cloudPending.current = false;
-        const next = cloudStateRef.current!;
+        const sent = cloudStateRef.current!;
         setCloudStatus("syncing");
-        const r = await api(
-          "state",
-          { state: next, revision: cloudRef.current.revision },
-          "PUT",
-        );
+        const patch = cloudBase.current ? await buildChangeSet(cloudBase.current, sent) : null;
+        if (epoch !== cloudEpoch.current || !cloudRef.current.active) break;
+        if (patch && !patch.changes.length) continue;
+        const r = patch
+          ? await api("changes", { changes: patch, revision: cloudRef.current.revision })
+          : await api("state", { state: sent, revision: cloudRef.current.revision }, "PUT");
+        if (epoch !== cloudEpoch.current || !cloudRef.current.active) break;
+        const server = validateStore(r.state ?? sent);
+        // The server can include edits from another device. Rebase anything
+        // typed while this request was in flight before updating the screen.
+        let merged: Store = server;
+        let current: Store;
+        do {
+          current = latest.current ?? sent;
+          const pending = await applyChangeSet(server, await buildChangeSet(sent, current));
+          if (epoch !== cloudEpoch.current || !cloudRef.current.active) return;
+          if (pending.conflicts.length) throw new Error("در زمان ثبت ابری، یک فیلد دوباره تغییر کرده است. تغییرات محلی حفظ شدند؛ نسخهٔ ابری را در تنظیمات بررسی کنید.");
+          merged = localNavigation(validateStore(pending.state), current.activeProjectId);
+        } while (current !== latest.current);
+        cloudBase.current = server;
         cloudRef.current = { ...cloudRef.current, revision: r.revision };
         setCloud((c) => ({ ...c, revision: r.revision }));
-        await rememberCloudLink(next, r.revision);
+        if (JSON.stringify(merged) !== JSON.stringify(current)) {
+          latest.current = merged;
+          setStore(merged);
+          unsaved.current = true;
+          const snapshot = merged;
+          const commit = saving.current.then(async () => {
+            const record = await saveLocal(snapshot, localRevision.current);
+            localRevision.current = record.revision;
+            if (latest.current === snapshot) { unsaved.current = false; setSaveStatus("saved"); }
+          });
+          saving.current = commit.catch(() => {});
+          try { await commit; }
+          catch (error) { setSaveStatus("error"); setReadOnly(true); throw error; }
+          if (epoch !== cloudEpoch.current || !cloudRef.current.active) return;
+        }
+        if (cloudPending.current) cloudStateRef.current = latest.current ?? merged;
+        await saveCloudBase(server, r.revision, session.user.id);
+        await rememberCloudLink(server, r.revision);
       }
-      setCloudStatus("synced");
-      setCloudError("");
+      if (epoch === cloudEpoch.current && cloudRef.current.active) {
+        busyRetries.current = 0;
+        setCloudStatus("synced");
+        setCloudError("");
+      }
     } catch (e) {
+      if (epoch !== cloudEpoch.current) return;
       cloudPending.current = true;
-      if (e instanceof TypeError || (e as Error).name === "TimeoutError") {
+      if (e instanceof CloudRequestError && e.code === "SYNC_BUSY" && busyRetries.current < 3) {
+        const delay = 1500 * 2 ** busyRetries.current++;
+        setCloudStatus("pending");
+        window.setTimeout(() => { if (epoch === cloudEpoch.current && cloudRef.current.active && latest.current) void syncCloud(latest.current); }, delay);
+      } else if (e instanceof TypeError || (e as Error).name === "TimeoutError") {
         setCloudStatus("pending");
         setOnline(false);
         setCloudError("");
@@ -366,7 +481,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     } finally {
       cloudBusy.current = false;
     }
-  }, []);
+  }, [session.user.id]);
   useEffect(() => {
     if (!store || !ready.current || readOnly || viewer) return;
     latest.current = store;
@@ -445,14 +560,14 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     (fn: (s: Store) => Store) => {
       if (transferInProgress.current) {
         notify("انتقال داده در حال انجام است؛ چند لحظه صبر کنید.");
-        return;
+        return false;
       }
       if (readOnly || viewer) {
         notify(viewer ? "حساب شما فقط اجازهٔ مشاهده دارد." : "برای ویرایش، تب دیگر را ببندید و این صفحه را تازه کنید.");
-        return;
+        return false;
       }
-      setStore((s) => {
-        if (!s) return s;
+        const s = latest.current;
+        if (!s) return false;
         const next = fn(s);
         const count = next.projects.reduce(
           (n, p) =>
@@ -467,16 +582,28 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
           notify(
             "ظرفیت این فضای کاری ۱۲۰٬۰۰۰ رکورد در مجموع پروژه‌هاست؛ یک پشتیبان جدا برای پروژه‌های قدیمی نگه دارید.",
           );
-          return s;
+          return false;
         }
-        return next;
-      });
+        latest.current = next;
+        setStore(next);
+        return true;
     },
     [readOnly, viewer, notify],
   );
   const canLeave = () => !hasDraft() || confirm("تغییرات ویرایشگر هنوز ذخیره نشده‌اند. از آن‌ها صرف‌نظر شود؟");
-  const navigate = (v: View) => {
-    if (v !== view && !canLeave()) return;
+  const navigate = (v: View, rowId?: string) => {
+    if ((v !== view || rowId) && !canLeave()) return;
+    if (rowId) {
+      if (v === "keywords") setKeywordMode("table");
+      if (v === "pages") setPageMode("table");
+      if (v === "results") {
+        const current = latest.current?.projects.find((item) => item.id === latest.current?.activeProjectId);
+        const result = current?.results.find((row) => row.id === rowId || row.pageId === rowId);
+        rowId = result?.id;
+        setResultsMode(result ? "table" : current?.searchConsole?.current ? "console" : "table");
+      }
+    }
+    setFocusRowId(rowId);
     setView(v);
     setSidebar(false);
     window.scrollTo({ top: 0 });
@@ -504,6 +631,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
       setSaveStatus("saved");
       setStore(next);
       forgetCloudLink();
+      cloudBase.current = null;
+      await clearCloudBase(session.user.id);
     } else {
       forceBackup.current = true;
       mutate(() => next);
@@ -537,9 +666,11 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
         setSaveStatus("saved");
       }
       const r = await api("state");
+      let base: Store;
       if (direction === "pull") {
         if (!r.state) throw new Error("نسخه ابری هنوز خالی است.");
-        const next = validateStore(r.state);
+        base = validateStore(r.state);
+        const next = localNavigation(base, snapshot.activeProjectId);
         if (
           !confirm(
             "نسخه ابری جای داده‌های دستگاه را بگیرد؟ پشتیبان محلی ابتدا دانلود می‌شود.",
@@ -560,6 +691,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
         };
       } else {
         validateStore(snapshot);
+        base = snapshot;
         if (
           r.state &&
           !confirm(
@@ -580,8 +712,10 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
           revision: saved.revision,
         };
       }
+      cloudBase.current = base;
       setCloud(cloudRef.current);
-      await rememberCloudLink(latest.current ?? snapshot, cloudRef.current.revision);
+      await saveCloudBase(base, cloudRef.current.revision, session.user.id);
+      await rememberCloudLink(base, cloudRef.current.revision);
       setCloudStatus("synced");
       setCloudError("");
       notify("همگام‌سازی فعال شد. تغییرات بعدی خودکار ذخیره می‌شوند.");
@@ -636,11 +770,32 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
   const props = {
     project,
     settings: store.settings,
-    onRowsChange: (key: Collection, rows: Project[Collection]) =>
-      updateProject({ [key]: rows }),
+    onRowsChange: (key: Collection, rows: Project[Collection]) => {
+      try {
+        const previous = latest.current ?? store;
+        const currentProject = previous.projects.find((item) => item.id === project.id);
+        if (!currentProject) return false;
+        const incoming = stampProject(currentProject, { ...currentProject, [key]: rows });
+        validateStore({ ...previous, projects: previous.projects.map((item) => item.id === incoming.id ? incoming : item) });
+        return updateProject({ [key]: incoming[key] });
+      } catch (error) { notify((error as Error).message); return false; }
+    },
     notify,
     readOnly: readOnly || viewer,
+    focusRowId,
+    onFocusHandled: () => setFocusRowId(undefined),
+    onNavigate: navigate,
   };
+  const replaceProject = (next: Project) => {
+    if (readOnly || viewer || transferInProgress.current) { notify("ثبت تغییرات در این وضعیت ممکن نیست؛ پیش‌نویس حفظ شد."); return false; }
+    if (next.id !== project.id) { notify("پروژه فعال تغییر کرده است؛ پیشنهادها را دوباره بررسی کنید."); return false; }
+    try {
+      const incoming = stampProject(project, next);
+      validateStore({ ...store, projects: store.projects.map((item) => item.id === incoming.id ? incoming : item) });
+      return updateProject(incoming);
+    } catch (error) { notify((error as Error).message); return false; }
+  };
+  const changeMode = (key: string, setter: (key: string) => void) => { if (canLeave()) setter(key); };
   const logout = async () => {
     if (!canLeave()) return;
     try {
@@ -825,23 +980,29 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
             </button>
           </div>
         )}
-        <main className="main-content">
+        <main className="main-content"><Suspense fallback={<div className="feature-loading" role="status">در حال آماده‌سازی فضای کار…</div>}>
           {view === "start" ? (
             <Dashboard
               project={project}
               store={store}
               navigate={navigate}
               updateProject={updateProject}
+              onProjectChange={replaceProject}
+              readOnly={readOnly || viewer}
+              notify={notify}
+              draftScope={session.user.id}
             />
           ) : view === "keywords" ? (
             <fieldset disabled={readOnly} className="workspace-access">
-              <KeywordWorkspace key={project.id} {...props} />
+              <WorkspaceModes items={[["table", "جدول کلمات"], ["planner", "دستیار هدف‌گذاری"]]} value={keywordMode} onChange={(key) => changeMode(key, setKeywordMode)} />
+              {keywordMode === "planner" ? <PagePlanner key={project.id} project={project} onProjectChange={replaceProject} notify={notify} readOnly={readOnly || viewer} onNavigate={navigate} /> : <KeywordWorkspace key={project.id} {...props} />}
             </fieldset>
           ) : view === "bulk" ? (
             <BulkEditWorkspace key={project.id} {...props} />
           ) : view === "pages" ? (
             <fieldset disabled={readOnly} className="workspace-access">
-              <PageWorkspace key={project.id} {...props} />
+              <WorkspaceModes items={[["table", "نقشه صفحات"], ["relationships", "ارتباط صفحات و لینک‌سازی"]]} value={pageMode} onChange={(key) => changeMode(key, setPageMode)} />
+              {pageMode === "relationships" ? <PageRelationships key={project.id} project={project} onProjectChange={replaceProject} notify={notify} readOnly={readOnly || viewer} /> : <PageWorkspace key={project.id} {...props} />}
             </fieldset>
           ) : view === "content" ? (
             <fieldset disabled={readOnly} className="workspace-access">
@@ -849,7 +1010,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
             </fieldset>
           ) : view === "results" ? (
             <fieldset disabled={readOnly} className="workspace-access">
-              <ResultsWorkspace key={project.id} {...props} />
+              <WorkspaceModes items={[["table", "پایش صفحات"], ["console", "تحلیل Search Console"], ["report", "گزارش پروژه"]]} value={resultsMode} onChange={(key) => changeMode(key, setResultsMode)} />
+              {resultsMode === "console" ? <SearchConsoleWorkspace key={project.id} project={project} onProjectChange={replaceProject} notify={notify} readOnly={readOnly || viewer} /> : resultsMode === "report" ? <ProjectReport key={project.id} project={project} notify={notify} readOnly={readOnly || viewer} /> : <ResultsWorkspace key={project.id} {...props} />}
             </fieldset>
           ) : (
             <SettingsPanel
@@ -875,7 +1037,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
               }}
             />
           )}
-          <footer className="page-footer">
+          </Suspense><footer className="page-footer">
             <span>استودیوی سئوی علیرضا ملائی</span>
             <span>داده‌ها متعلق به شماست.</span>
           </footer>
@@ -898,6 +1060,9 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
               const p = {
                 ...createProject(name.trim()),
                 domain: domain.trim(),
+                playbook: cloneProjectPlaybook(newPlaybook),
+                projectType: newPlaybook.projectType || "Mixed",
+                goal: newPlaybook.conversionGoal,
               };
               mutate((s) => ({
                 ...s,
@@ -946,6 +1111,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
                 placeholder="example.com"
               />
             </label>
+            <Suspense fallback={<p className="muted">آماده‌سازی روال پروژه…</p>}><PlaybookPicker value={newPlaybook} onChange={setNewPlaybook} customPlaybooks={store.settings.playbooks} /></Suspense>
             <button className="btn btn-primary full-width" type="submit">
               ساخت پروژه <ArrowLeft size={17} />
             </button>
@@ -970,43 +1136,24 @@ function Dashboard({
   store,
   navigate,
   updateProject,
+  onProjectChange,
+  readOnly,
+  notify,
+  draftScope,
 }: {
   project: Project;
   store: Store;
-  navigate: (v: View) => void;
+  navigate: (v: View, rowId?: string) => void;
   updateProject: (p: Partial<Project>) => void;
+  onProjectChange: (project: Project) => boolean | void;
+  readOnly: boolean;
+  notify: (message: string) => void;
+  draftScope: string;
 }) {
   const summary = useMemo(
     () => summarize(project, store.settings),
     [project, store.settings],
   );
-  const keywordMap = useMemo(
-    () => keywordLookup(project.keywords),
-    [project.keywords],
-  );
-  const duplicateMap = useMemo(
-    () => duplicates(project.keywords),
-    [project.keywords],
-  );
-  const resultMap = useMemo(
-    () => resultLookup(project.results, project.pages),
-    [project.results, project.pages],
-  );
-  const pageAction = (row: Row) => {
-    const key = normalizeKeyword(String(row.pkw ?? ""));
-    if (
-      row.status !== "Complete" &&
-      row.action !== "No Dedicated Page" &&
-      (duplicateMap.get(key) ?? 0) > 1
-    )
-      return "کلمه اصلی تکراری است؛ داده‌ها را بازبینی کنید";
-    return nextPage(
-      row,
-      store.settings,
-      keywordMap.get(key),
-      resultMap.get(row.id),
-    );
-  };
   const targets = [
     "keywords",
     "pages",
@@ -1046,32 +1193,6 @@ function Dashboard({
       color: "amber",
     },
   ];
-  const tasks = [
-    ...project.pages
-      .filter((r) => r.action !== "No Dedicated Page")
-      .filter((r) => pageAction(r) !== "تکمیل شده")
-      .slice(0, 3)
-      .map((r) => ({
-        id: r.id,
-        title: String(r.target || r.pkw || "صفحه بدون نام"),
-        label: pageAction(r),
-        priority: String(r.priority || "P2"),
-        view: "pages" as View,
-      })),
-    ...project.keywords
-      .filter(
-        (r) =>
-          r.decision !== "Exclude" && nextKeyword(r) !== "آماده هدف‌گذاری صفحه",
-      )
-      .slice(0, 2)
-      .map((r) => ({
-        id: r.id,
-        title: String(r.keyword),
-        label: nextKeyword(r),
-        priority: "کلمه",
-        view: "keywords" as View,
-      })),
-  ].slice(0, 4);
   return (
     <>
       <div className="workspace-heading dashboard-heading">
@@ -1178,6 +1299,7 @@ function Dashboard({
           </button>
         ))}
       </section>
+      <ProjectAssistant key={project.id} project={project} onProjectChange={onProjectChange} onNavigate={navigate} notify={notify} readOnly={readOnly} draftScope={draftScope} />
       <section className="journey-card">
         <div className="section-title">
           <div>
@@ -1219,51 +1341,7 @@ function Dashboard({
           ))}
         </div>
       </section>
-      <div className="dashboard-bottom">
-        <section className="focus-card">
-          <div className="section-title">
-            <div>
-              <h3>روی این‌ها تمرکز کن</h3>
-              <p>قدم‌های باز پروژه، بدون شلوغی.</p>
-            </div>
-            <span className="focus-icon">
-              <Target size={20} />
-            </span>
-          </div>
-          {tasks.length ? (
-            tasks.map((t) => (
-              <button
-                className="task-row"
-                key={t.id}
-                onClick={() => navigate(t.view)}
-              >
-                <span
-                  className={
-                    "priority-tag " + (t.priority === "P0" ? "p0" : "")
-                  }
-                >
-                  {t.priority}
-                </span>
-                <span>
-                  <strong>{t.title}</strong>
-                  <small>{t.label}</small>
-                </span>
-                <ArrowUpLeft size={18} />
-              </button>
-            ))
-          ) : (
-            <div className="empty-focus">
-              <CheckCircle2 />
-              <p>فضا برای شروع آماده است.</p>
-              <button
-                className="btn btn-secondary"
-                onClick={() => navigate("keywords")}
-              >
-                اولین کلمه را اضافه کن
-              </button>
-            </div>
-          )}
-        </section>
+      <div className="dashboard-bottom dashboard-summary-only">
         <section className="health-card">
           <div className="section-title">
             <div>
@@ -1439,6 +1517,7 @@ function SettingsPanel({
           ["project", "پروژه و تنظیمات"],
           ["backup", "پشتیبان و فضای ابری"],
           ["security", "حساب و تیم"],
+          ["history", "سابقه تغییرات"],
           ["guide", "راهنمای فیلدها"],
         ].map(([k, v]) => (
           <button
@@ -1504,6 +1583,16 @@ function SettingsPanel({
                 </select>
               </label>
             </div>
+          </section>
+          <section className="settings-card">
+            <h3>روال و مخاطب پروژه</h3><p className="muted">روال انتخابی، ساختار بریف‌ها و پیشنهادهای این پروژه را مشخص می‌کند.</p>
+            <PlaybookPicker value={project.playbook} disabled={readOnly} customPlaybooks={store.settings.playbooks} onChange={(value) => updateProject({ playbook: cloneProjectPlaybook(value), projectType: value.projectType || project.projectType, goal: project.goal || value.conversionGoal })} onSave={(value) => {
+              if (readOnly) return false;
+              const existing = store.settings.playbooks || [];
+              if (existing.length >= 30 && !existing.some((item) => item.id === value.id)) { notify("حداکثر ۳۰ روال شخصی قابل نگهداری است."); return false; }
+              mutate((state) => ({ ...state, settings: { ...state.settings, playbooks: [...(state.settings.playbooks || []).filter((item) => item.id !== value.id), cloneProjectPlaybook(value)] } }));
+              return true;
+            }} />
           </section>
           <section className="settings-card">
             <h3>سیگنال‌های بررسی عنوان و متا</h3>
@@ -1828,6 +1917,8 @@ function SettingsPanel({
             )}
           </section>
         </>
+      ) : tab === "history" ? (
+        <ProjectHistory projectId={project.id} mode={session.mode} />
       ) : tab === "security" ? (
         <>
           <TeamSettings session={session} onSessionRefresh={auth.refresh} readOnly={session.mode === "offline"} />

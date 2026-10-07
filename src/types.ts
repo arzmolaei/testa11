@@ -14,6 +14,10 @@ export type Project = {
   pages: Row[];
   content: Row[];
   results: Row[];
+  tasks?: Row[];
+  links?: Row[];
+  searchConsole?: SearchConsoleData;
+  playbook?: ProjectPlaybook;
 };
 export type Settings = {
   titleMin: number;
@@ -21,6 +25,7 @@ export type Settings = {
   metaMin: number;
   metaMax: number;
   customLabels?: Record<string, string>;
+  playbooks?: ProjectPlaybook[];
 };
 export type Store = {
   version: 1;
@@ -40,7 +45,12 @@ export type Section = { key: string; label: string; fields: Field[] };
 export type WorkspaceProps = {
   project: Project;
   settings: Settings;
-  onRowsChange: (collection: Collection, rows: Row[]) => void;
+  onRowsChange: (collection: Collection, rows: Row[]) => boolean | void;
   notify: (message: string) => void;
   readOnly?: boolean;
+  focusRowId?: string;
+  onFocusHandled?: () => void;
+  onNavigate?: (view: Collection | "bulk", rowId?: string) => void;
 };
+import type { SearchConsoleData } from "./search-console";
+import type { ProjectPlaybook } from "./playbooks";

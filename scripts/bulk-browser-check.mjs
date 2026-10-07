@@ -38,10 +38,12 @@ try {
   const fixture = {
     version: 1, activeProjectId: "bulk-project", settings: { titleMin: 30, titleMax: 60, metaMin: 120, metaMax: 160 },
     projects: [{ id: "bulk-project", name: "آزمایش تغییر گروهی", domain: "example.com", market: "ایران", language: "فارسی", projectType: "Ecommerce", goal: "", startDate: "2026-10-07", lastReview: "",
-      keywords: Array.from({ length: 2000 }, (_, n) => ({ id: `k${n}`, keyword: n === 0 ? "خرید دوربین داهوا ویژه" : n === 1 ? "قیمت دوربین داهوا" : n === 2 ? "خرید دوربین هایک ویژن" : `خرید کابل شبکه مدل ${n}`, volume: n, decision: "Review", notes: `یادداشت محفوظ ${n}`, ...(n === 0 ? { intent: "ناوبری", group: "گروه دستی محفوظ" } : {}) })),
+      keywords: Array.from({ length: 2000 }, (_, n) => ({ id: `k${n}`, keyword: n === 0 ? "خرید دوربین داهوا ویژه" : n === 1 ? "قیمت دوربین داهوا" : n === 2 ? "خرید دوربین هایک ویژن" : `خرید کابل شبکه مدل ${n}`, volume: n, decision: "Review", notes: `یادداشت محفوظ ${n}`, ...(n === 0 ? { intent: "ناوبری", group: "گروه دستی محفوظ", targetPage: "p0" } : {}) })),
       pages: [{ id: "p0", pageId: "P-1", target: "صفحه محصول", pkw: "خرید دوربین", status: "Not Started", url: "https://example.com/product" }, { id: "p1", pageId: "P-2", target: "صفحه کابل", status: "Not Started", url: "https://example.com/cable" }],
       content: [{ id: "c0", topic: "راهنمای دوربین", targetPage: "p0", owner: "علیرضا", publishDate: "2026-10-07" }],
       results: [{ id: "r0", pageId: "p0", url: "https://example.com/product", clicks: 10, impressions: 100, baselineDate: "2026-10-07" }],
+      tasks: [{ id: "t0", title: "بررسی صفحه", pageId: "p0", status: "open" }],
+      links: [{ id: "l0", fromPageId: "p0", toPageId: "p1", anchor: "کابل", status: "planned" }],
     }],
   };
   await page.evaluate((state) => new Promise((resolve, reject) => { const open = indexedDB.open("rooyesh-seo-v1", 1); open.onsuccess = () => { const db = open.result; const tx = db.transaction("workspace", "readwrite"); tx.objectStore("workspace").put({ state, revision: 50, savedAt: new Date().toISOString() }, "state"); tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error); }; }), fixture);
@@ -69,10 +71,18 @@ try {
   assert.equal(await page.locator("[data-cell='1:0']").evaluate((el) => el === document.activeElement), true);
   await save(); await until((p) => p.keywords[0].keyword.endsWith("ویرایش"));
   check("Inline editing commits with Enter and moves to the next row without losing data");
-  await page.locator('[data-cell="0:6"]').dblclick(); await page.locator(".bulk-cell-editor textarea").press("Tab");
+  await page.getByRole("button", { name: "بازگردانی ذخیره اخیر", exact: true }).click();
+  await until((p) => p.keywords[0].keyword === "خرید دوربین داهوا ویژه");
+  await page.locator('[data-cell="0:0"]').dblclick();
+  await page.getByLabel("کلمه کلیدی", { exact: true }).fill("خرید دوربین داهوا ویژه ویرایش");
+  await page.getByLabel("کلمه کلیدی", { exact: true }).press("Enter"); await save();
+  await until((p) => p.keywords[0].keyword.endsWith("ویرایش"));
+  check("Undoing a committed transaction accepts validated rows with generated timestamps and restores the previous values");
+  const lastColumn = Number(await page.locator(".bulk-grid").getAttribute("aria-colcount")) - 3;
+  await page.locator(`[data-cell="0:${lastColumn}"]`).dblclick(); await page.locator(".bulk-cell-editor textarea,.bulk-cell-editor select").press("Tab");
   assert.equal(await page.locator("[data-cell='1:0']").evaluate((el) => el === document.activeElement), true);
   await page.locator('[data-cell="1:0"]').dblclick(); await page.locator(".bulk-cell-editor textarea").press("Shift+Tab");
-  assert.equal(await page.locator("[data-cell='0:6']").evaluate((el) => el === document.activeElement), true);
+  assert.equal(await page.locator(`[data-cell="0:${lastColumn}"]`).evaluate((el) => el === document.activeElement), true);
   check("Tab and Shift+Tab wrap across row boundaries in RTL logical column order");
   await page.locator('[data-cell="0:0"]').click(); await page.locator('[data-cell="1:1"]').click({ modifiers: ["Shift"] });
   assert.equal(await page.locator(".bulk-grid td.bulk-cell-selected").count(), 4);
@@ -109,10 +119,10 @@ try {
   check("Fill-down copies the first selected value and transaction undo restores prior values");
   await page.locator(".bulk-tabs button").filter({ hasText: "نقشه صفحات" }).click();
   await page.getByLabel("انتخاب ردیف 1", { exact: true }).check(); await page.getByRole("button", { name: "حذف ردیف‌های محدوده", exact: true }).click();
-  assert.ok((await page.getByRole("dialog", { name: "حذف ۱ ردیف" }).textContent()).includes("۲ محتوا یا نتیجه"));
+  assert.ok((await page.getByRole("dialog", { name: "حذف ۱ ردیف" }).textContent()).includes("۵ رکورد مرتبط"));
   await page.getByRole("button", { name: "حذف از پیش‌نویس", exact: true }).click(); assert.equal(await page.locator(".bulk-grid tbody tr:not(.bulk-spacer)").count(), 1);
   await page.getByRole("button", { name: "واگرد", exact: true }).click(); assert.equal(await page.locator(".bulk-grid tbody tr:not(.bulk-spacer)").count(), 2);
-  check("Bulk page deletion warns about linked content/results and remains reversible before saving");
+  check("Bulk page deletion warns about linked keywords/content/results/tasks/links and remains reversible before saving");
   await page.locator('.bulk-tabs button').filter({ hasText: "محتوا و تقویم" }).click();
   await page.getByLabel("فیلد تغییر گروهی").selectOption("publishDate"); await page.getByLabel("مقدار تغییر گروهی", { exact: true }).fill("۱۴۰۵/۰۸/۰۱");
   await page.getByLabel("انتخاب تمام نتایج جدول").check(); await page.getByRole("button", { name: "اعمال روی ۱ ردیف", exact: true }).click(); await save();

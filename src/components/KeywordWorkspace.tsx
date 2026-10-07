@@ -200,6 +200,8 @@ export function KeywordWorkspace({
   onRowsChange,
   notify,
   readOnly = false,
+  focusRowId,
+  onFocusHandled,
 }: WorkspaceProps) {
   const rows = project.keywords;
   const [query, setQuery] = useState("");
@@ -285,8 +287,9 @@ export function KeywordWorkspace({
     (r) => (dupeCounts.get(normalizeKeyword(String(r.keyword ?? ""))) ?? 0) > 1,
   ).length;
   const updateRows = (updated: Row[]) => {
-    if (readOnly) { notify("حساب شما فقط اجازهٔ مشاهده دارد."); return; }
-    onRowsChange("keywords", updated);
+    if (readOnly) { notify("حساب شما فقط اجازهٔ مشاهده دارد."); return false; }
+    try { return onRowsChange("keywords", updated) !== false; }
+    catch (error) { notify(error instanceof Error ? error.message : "ذخیرهٔ کلمات انجام نشد؛ پیش‌نویس و انتخاب‌ها حفظ شده‌اند."); return false; }
   };
   const changeFilter = (setter: (value: string) => void, value: string) => {
     setter(value);
@@ -336,6 +339,12 @@ export function KeywordWorkspace({
     setEditError("");
     setDiscardOpen(false);
   };
+  useEffect(() => {
+    if (!focusRowId) return;
+    const row = rows.find((item) => item.id === focusRowId);
+    if (row) { draftBaseline.current = { ...row }; setDraft({ ...row }); setNewRow(false); }
+    onFocusHandled?.();
+  }, [focusRowId, rows, onFocusHandled]);
   const closeDrawer = () => {
     if (draftDirty) setDiscardOpen(true);
     else finishCloseDrawer();
@@ -377,20 +386,24 @@ export function KeywordWorkspace({
       return;
     }
     const clean = { ...draft, keyword: String(draft.keyword).trim() };
-    updateRows(
+    if (!newRow && JSON.stringify(rows.find((row) => row.id === draft.id)) !== JSON.stringify(draftBaseline.current)) {
+      setEditError("این کلمه هم‌زمان تغییر کرده است. متن خود را کپی کنید و پنل را دوباره باز کنید.");
+      return;
+    }
+    if (!updateRows(
       newRow
         ? [...rows, clean]
         : rows.map((r) => (r.id === draft.id ? clean : r)),
-    );
+    )) return;
     finishCloseDrawer();
     notify(newRow ? "کلمه کلیدی اضافه شد." : "تغییرات کلمه کلیدی ذخیره شد.");
   };
   const bulkDecision = (value: string) => {
-    updateRows(
+    if (!updateRows(
       rows.map((r) =>
         validSelected.has(r.id) ? { ...r, decision: value } : r,
       ),
-    );
+    )) return;
     notify(
       `${validSelected.size.toLocaleString("fa-IR")} کلمه به «${DECISION_NAMES[value]}» تغییر کرد.`,
     );
@@ -533,7 +546,7 @@ export function KeywordWorkspace({
         importPreview.incoming.map((row) => ({ ...row, id: uid() })),
         importMode,
       );
-      updateRows(result.rows);
+      if (!updateRows(result.rows)) return;
       closeImport();
       notify(
         `ورود داده انجام شد: ${result.added.toLocaleString("fa-IR")} کلمه جدید و ${result.matched.toLocaleString("fa-IR")} تطبیق.`,
@@ -648,10 +661,10 @@ export function KeywordWorkspace({
           >
             <option value="">انتخاب کنید</option>
             {present(value) &&
-              !(field.options ?? []).includes(String(value)) && (
+              (field.key === "targetPage" ? !project.pages.some((page) => page.id === String(value)) : !(field.options ?? []).includes(String(value))) && (
                 <option value={value}>{value} (واردشده)</option>
               )}
-            {(field.options ?? []).map((option) => (
+            {field.key === "targetPage" ? project.pages.map((page) => <option value={page.id} key={page.id}>{String(page.target || page.pkw || page.pageId)}</option>) : (field.options ?? []).map((option) => (
               <option value={option} key={option}>
                 {DECISION_NAMES[option] ?? option}
               </option>
@@ -1107,7 +1120,7 @@ export function KeywordWorkspace({
                     را بررسی کنید.
                   </div>
                 )}
-              <div className="form-grid">{coreFields.map(renderField)}</div>
+              <div className="form-grid">{coreFields.map(renderField)}{SCHEMAS.keywords.flatMap((section) => section.fields).filter((field) => field.key === "targetPage").map(renderField)}</div>
               {SCHEMAS.keywords
                 .filter((s) => s.key !== "core")
                 .map((section) => (
@@ -1219,7 +1232,7 @@ export function KeywordWorkspace({
                 className="btn btn-danger"
                 onClick={() => {
                   const ids = new Set(deleteIds);
-                  updateRows(rows.filter((r) => !ids.has(r.id)));
+                  if (!updateRows(rows.filter((r) => !ids.has(r.id)))) return;
                   setSelected(
                     (old) => new Set([...old].filter((id) => !ids.has(id))),
                   );
@@ -1270,13 +1283,13 @@ export function KeywordWorkspace({
                 className="btn btn-primary"
                 disabled={!bulkGroup.trim()}
                 onClick={() => {
-                  updateRows(
+                  if (!updateRows(
                     rows.map((r) =>
                       validSelected.has(r.id)
                         ? { ...r, group: bulkGroup.trim() }
                         : r,
                     ),
-                  );
+                  )) return;
                   setGroupModal(false);
                   notify("گروه کلمات انتخاب‌شده ذخیره شد.");
                 }}

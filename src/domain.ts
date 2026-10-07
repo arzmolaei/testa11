@@ -8,6 +8,7 @@ import type {
   Store,
 } from "./types";
 import { todayIso, toIsoDate } from "./dates";
+import { validateProjectExtras, validateSavedPlaybooks } from "./project-data";
 
 export const DEFAULT_SETTINGS: Settings = {
   titleMin: 30,
@@ -185,6 +186,7 @@ export const SCHEMAS: Record<Collection, Section[]> = {
           "عبارت‌هایی که احتمالاً یک صفحه مشترک دارند؛ پس از بررسی نتایج جست‌وجو تصمیم بگیرید.",
         ),
         note("notes", "یادداشت"),
+        f("targetPage", "صفحه هدف", "select"),
       ],
     },
     {
@@ -1321,9 +1323,10 @@ export function validateStore(input: unknown): Store {
       settings.customLabels[key] = label;
     }
   }
+  if (input.settings.playbooks !== undefined) settings.playbooks = validateSavedPlaybooks(input.settings.playbooks);
   const projectIds = new Set<string>();
-  let totalRows = 0,
-    totalText = 0;
+  let totalRows = 0, coreRows = 0,
+    totalText = JSON.stringify(settings).length;
   const projects: Project[] = input.projects.map((raw): Project => {
     if (
       !object(raw) ||
@@ -1372,7 +1375,8 @@ export function validateStore(input: unknown): Store {
       if (!Array.isArray(source) || source.length > capacities[collection])
         throw new Error(`ظرفیت یا ساختار بخش ${collection} معتبر نیست.`);
       totalRows += source.length;
-      if (totalRows > 120000)
+      coreRows += source.length;
+      if (coreRows > 120000)
         throw new Error("حجم کلی فایل پشتیبان بیش از حد مجاز است.");
       project[collection] = source.map((rawRow): Row => {
         if (
@@ -1422,6 +1426,10 @@ export function validateStore(input: unknown): Store {
         return row;
       });
     }
+    Object.assign(project, validateProjectExtras(raw));
+    totalRows += (project.tasks?.length ?? 0) + (project.links?.length ?? 0) + (project.searchConsole?.current?.rows.length ?? 0) + (project.searchConsole?.previous?.rows.length ?? 0);
+    totalText += JSON.stringify({ tasks: project.tasks, links: project.links, searchConsole: project.searchConsole, playbook: project.playbook }).length;
+    if (totalRows > 160000 || totalText > 25_000_000) throw new Error("حجم کلی فایل پشتیبان بیش از حد مجاز است.");
     return project;
   });
   if (
