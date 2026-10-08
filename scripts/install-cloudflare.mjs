@@ -151,6 +151,12 @@ export function validPassword(value) {
   return typeof value === 'string' && value.length >= 12 && value.length <= 1024 && !/[\r\n\u0000]/.test(value) && value.trim() === value;
 }
 
+// Updating verifies a password that already exists. Account settings allow
+// leading/trailing spaces, so the installer's new-password policy cannot reject it.
+export function validExistingPassword(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 1024;
+}
+
 async function newPassword(secret, log) {
   for (;;) {
     const password = await secret('Choose the app password (12+ characters): ');
@@ -364,7 +370,7 @@ export async function installCloudflare(options = {}, dependencies = {}) {
     }
     if (!Array.isArray(secrets)) throw new Error('Cloudflare returned an invalid secret list.');
     const hasPassword = secrets.some(item => item.name === 'APP_PASSWORD');
-    if (!hasPassword && state.passwordConfigured) throw new Error('The existing session secret is missing. Restore APP_PASSWORD in Cloudflare before updating; existing account passwords are preserved.');
+    if (!hasPassword && (state.passwordConfigured || state.deployed)) throw new Error('The existing session secret is missing. Restore APP_PASSWORD in Cloudflare before updating; existing account passwords are preserved.');
     if (!hasPassword) {
       log('Choose a password for signing into the app. It will be stored as a Cloudflare secret.');
       password = await newPassword(secret, log);
@@ -376,9 +382,13 @@ export async function installCloudflare(options = {}, dependencies = {}) {
       state.passwordConfigured = true;
       await save();
     } else {
+      // A previous upload may have succeeded just before its connection failed.
+      // Record that discovery too, so a later missing secret cannot be replaced.
+      state.passwordConfigured = true;
+      await save();
       log('Existing account passwords will be kept. Enter the current alireza account password to verify the update.');
       password = await secret('Current alireza password: ');
-      if (!validPassword(password)) throw new Error('The existing app password must contain at least 12 characters.');
+      if (!validExistingPassword(password)) throw new Error('Enter the current alireza account password (up to 1024 characters).');
     }
     log('Publishing the app...');
     log('A new Cloudflare account may ask once to choose its workers.dev subdomain.');

@@ -61,7 +61,17 @@ try {
   }, state);
   assert.equal(performance.changes, 2000); assert.ok(performance.bytes < 1024 * 1024); assert.ok(performance.elapsed < 2000);
   check("2,000 edited rows produce a bounded incremental request");
+  const fullBulk = await page.evaluate(async (state) => {
+    const base = structuredClone(state); base.projects[0].keywords = Array.from({ length: 20000 }, (_, index) => ({ id: `full${index}`, keyword: `کلمه ${index}`, intent: "" }));
+    const next = structuredClone(base); next.projects[0].keywords.forEach((row) => row.intent = "Commercial");
+    const patch = await window.sync.buildChangeSet(base, next), start = performance.now();
+    const result = await window.sync.applyChangeSet(base, patch);
+    return { milliseconds: performance.now() - start, applied: result.applied.length, conflicts: result.conflicts.length, first: result.state.projects[0].keywords[0], last: result.state.projects[0].keywords.at(-1), unchangedInput: base.projects[0].keywords[0].intent === "" };
+  }, state);
+  assert.equal(fullBulk.applied, 20000); assert.equal(fullBulk.conflicts, 0); assert.equal(fullBulk.unchangedInput, true);
+  assert.equal(fullBulk.first.intent, "Commercial"); assert.equal(fullBulk.last.id, "full19999"); assert.ok(fullBulk.milliseconds < 2000);
+  check("20,000-row merge preserves input and ordering without repeated whole-table searches");
   assert.deepEqual(errors, []); assert.deepEqual(external, []);
   await mkdir("artifacts", { recursive: true });
-  await writeFile("artifacts/record-sync-browser-checks.json", JSON.stringify({ passed: checks.length, checks, errors, external, performance }, null, 2));
+  await writeFile("artifacts/record-sync-browser-checks.json", JSON.stringify({ passed: checks.length, checks, errors, external, performance, fullBulk }, null, 2));
 } finally { await context.close(); await browser.close(); await server.close(); }

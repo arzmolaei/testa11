@@ -35,6 +35,8 @@ import {
 import "./KeywordWorkspace.css";
 import { formatJalaliInput, jalaliFileDate } from "../dates";
 import { JalaliDateInput } from "./JalaliDateInput";
+import { useRowDraft } from "../row-draft";
+import { RowDraftRecovery } from "./RowDraftRecovery";
 
 type ImportKey = "keyword" | "volume" | "kdTool" | "toolIntent" | "source";
 type ImportState = {
@@ -202,6 +204,7 @@ export function KeywordWorkspace({
   readOnly = false,
   focusRowId,
   onFocusHandled,
+  draftScope = "local-development",
 }: WorkspaceProps) {
   const rows = project.keywords;
   const [query, setQuery] = useState("");
@@ -217,6 +220,7 @@ export function KeywordWorkspace({
   const [newRow, setNewRow] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
   const draftBaseline = useRef<Row | null>(null);
+  const draftInitial = useRef<Row | null>(null);
   const closeDrawerRef = useRef<() => void>(() => {});
   const [editError, setEditError] = useState("");
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
@@ -311,40 +315,46 @@ export function KeywordWorkspace({
     });
   const draftDirty = Boolean(
     draft &&
-    draftBaseline.current &&
+    draftInitial.current &&
     [
       ...new Set([
         ...Object.keys(draft),
-        ...Object.keys(draftBaseline.current),
+        ...Object.keys(draftInitial.current),
       ]),
     ].some(
       (key) =>
         key !== "id" &&
-        String(draft[key] ?? "") !== String(draftBaseline.current?.[key] ?? ""),
+        String(draft[key] ?? "") !== String(draftInitial.current?.[key] ?? ""),
     ),
   );
+  const formDraft = useRowDraft({ projectId: project.id, collection: "keywords", scope: draftScope, readOnly,
+    draft, baseline: draftBaseline.current, initial: draftInitial.current, creating: newRow, dirty: draftDirty });
   const openRow = (row?: Row) => {
+    if (!formDraft.ready || formDraft.recovery) { notify("ابتدا پیش‌نویس قبلی را بازیابی یا کنار بگذارید."); return; }
     const initial = row
       ? { ...row }
       : { id: uid(), keyword: "", decision: "Review" };
-    draftBaseline.current = { ...initial };
+    draftBaseline.current = row ? { ...row } : null;
+    draftInitial.current = { ...initial };
     setDraft(initial);
     setNewRow(!row);
     setEditError("");
     setDiscardOpen(false);
   };
   const finishCloseDrawer = () => {
+    formDraft.clear();
     draftBaseline.current = null;
+    draftInitial.current = null;
     setDraft(null);
     setEditError("");
     setDiscardOpen(false);
   };
   useEffect(() => {
-    if (!focusRowId) return;
+    if (!focusRowId || !formDraft.ready || formDraft.recovery) return;
     const row = rows.find((item) => item.id === focusRowId);
-    if (row) { draftBaseline.current = { ...row }; setDraft({ ...row }); setNewRow(false); }
+    if (row) { draftBaseline.current = { ...row }; draftInitial.current = { ...row }; setDraft({ ...row }); setNewRow(false); }
     onFocusHandled?.();
-  }, [focusRowId, rows, onFocusHandled]);
+  }, [focusRowId, rows, onFocusHandled, formDraft.ready, formDraft.recovery]);
   const closeDrawer = () => {
     if (draftDirty) setDiscardOpen(true);
     else finishCloseDrawer();
@@ -697,6 +707,12 @@ export function KeywordWorkspace({
 
   return (
     <section className="kw-workspace">
+      <RowDraftRecovery draft={formDraft.recovery} error={formDraft.error} onDiscard={formDraft.clear} onRecover={() => {
+        const saved = formDraft.recover();
+        if (!saved) return;
+        draftBaseline.current = saved.baseline; draftInitial.current = saved.initial;
+        setDraft({ ...saved.row }); setNewRow(saved.creating); setEditError(""); setDiscardOpen(false);
+      }}/>
       <div className="workspace-heading">
         <div>
           <span className="eyebrow">RESEARCH · ۰۱</span>
@@ -710,7 +726,7 @@ export function KeywordWorkspace({
             <Upload size={17} />
             ورود داده
           </button>
-          <button disabled={readOnly} className="btn btn-primary" onClick={() => openRow()}>
+          <button disabled={readOnly || !formDraft.ready || !!formDraft.recovery} className="btn btn-primary" onClick={() => openRow()}>
             <Plus size={18} />
             کلمه جدید
           </button>
@@ -993,6 +1009,7 @@ export function KeywordWorkspace({
                     <td className="kw-next-col">
                       <button
                         className="kw-next-action"
+                        disabled={!formDraft.ready}
                         onClick={() => openRow(row)}
                       >
                         {nextKeyword(row)}
@@ -1002,6 +1019,7 @@ export function KeywordWorkspace({
                     <td>
                       <button
                         className="icon-button"
+                        disabled={!formDraft.ready}
                         aria-label={`ویرایش ${row.keyword}`}
                         onClick={() => openRow(row)}
                       >

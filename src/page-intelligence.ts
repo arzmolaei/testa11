@@ -281,7 +281,7 @@ function unchanged(row: Row, candidate: PageCandidate): boolean {
   try {
     const before = JSON.parse(snapshot) as string[];
     // A newly linked target is separately protected and allows idempotent re-apply.
-    return before[0] === text(row.keyword) && before[1] === text(row.group) && before[2] === text(row.intent);
+    return before[0] === text(row.keyword) && before[1] === text(row.group) && before[2] === text(row.intent) && (!before[3] || before[3] === text(row.targetPage));
   } catch { return false; }
 }
 
@@ -333,7 +333,7 @@ export function buildPagePlan(
     const eligible = rows.filter((row) => !text(row.targetPage) || text(row.targetPage) === page?.id);
     skipped += rows.length - eligible.length;
     if (!eligible.length) continue;
-    const primary = text(selection.primaryKeyword) || candidate.primaryKeyword || text(eligible[0].keyword);
+    const primary = text(selection.primaryKeyword) || (eligible.some((row) => canonical(row.keyword) === canonical(candidate.primaryKeyword)) ? candidate.primaryKeyword : text(eligible[0].keyword));
     const label = text(selection.label) || candidate.label || primary;
     const pageType = text(selection.pageType) || candidate.pageType || "Needs Review";
     if (!page) {

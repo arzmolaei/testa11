@@ -143,6 +143,25 @@ describe("Record-level three-way merge", () => {
     const hashAfter = JSON.parse(JSON.stringify(patch)); hashAfter.changes[0].fields.keyword.after = { exists: true, hash: "a".repeat(64) };
     expect(() => validateChangeSet(hashAfter)).toThrow("INVALID_CHANGES");
   });
+  it("retains row order and immutable inputs through a large mixed bulk edit, removal and append", async () => {
+    const base = fixture();
+    base.projects[0].keywords = Array.from({ length: 10000 }, (_, index) => ({ id: `bulk${index}`, keyword: `کلمه ${index}`, intent: "" }));
+    const next = changed(base, (store) => {
+      store.projects[0].keywords = store.projects[0].keywords.filter((_, index) => index % 2 === 0).map((row) => ({ ...row, intent: "Commercial" }));
+      store.projects[0].keywords.push({ id: "appended", keyword: "آخرین کلمه", intent: "Informational" });
+      store.projects[0].tasks = [{ id: "first-task", title: "بررسی گروه‌ها" }];
+    });
+    const patch = await buildChangeSet(base, next);
+    const result = await applyChangeSet(base, patch);
+    expect(result.conflicts).toEqual([]);
+    expect(result.state.projects[0].keywords).toEqual(next.projects[0].keywords);
+    expect(result.state.projects[0].tasks).toEqual(next.projects[0].tasks);
+    expect(result.applied).toHaveLength(10002);
+    expect(base.projects[0].keywords).toHaveLength(10000);
+    expect(base.projects[0].keywords[0].intent).toBe("");
+    expect(base.projects[0]).not.toHaveProperty("tasks");
+    expect((await applyChangeSet(result.state, patch)).applied).toEqual([]);
+  });
 });
 
 const origin = "https://seo.example", password = "test-only-record-sync-owner-123";

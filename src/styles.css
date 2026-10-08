@@ -1464,6 +1464,22 @@ button {
 .warning-banner button {
   margin-right: auto;
 }
+.row-draft-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 18px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.9;
+}
+.row-draft-recovery p { margin: 4px 0 0; color: var(--muted); }
+.row-draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .loading-screen,
 .fatal {
   height: 100vh;

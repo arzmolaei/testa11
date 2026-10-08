@@ -230,11 +230,43 @@ describe("Team accounts with actual SQLite SQL", () => {
       bodies.push(await response.json());
     }
     expect(bodies).toEqual([{ error: "INVALID_CREDENTIALS" }, { error: "INVALID_CREDENTIALS" }, { error: "INVALID_CREDENTIALS" }]);
-    for (let i = 0; i < 7; i++) expect((await call("/api/login", "POST", { username: "unknown", password: "wrong" })).status).toBe(401);
+    for (let i = 0; i < 9; i++) expect((await call("/api/login", "POST", { username: "alireza", password: "wrong" })).status).toBe(401);
     const limited = await call("/api/login", "POST", { username: "alireza", password: secret });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toBe("900");
   });
+
+  it("does not let a valid teammate reset another account's failed-login limit", async () => {
+    const owner = await login();
+    await create(owner, "viewer", "viewer");
+    for (let attempt = 0; attempt < 10; attempt++) {
+      expect((await call("/api/login", "POST", { username: "alireza", password: "wrong" })).status).toBe(401);
+      await login("viewer", memberPassword);
+    }
+    expect(db.database.prepare("SELECT attempts FROM seo_login_attempts WHERE attempts > 0 ORDER BY attempts").all().map((entry) => entry.attempts)).toEqual([10, 10]);
+    const limited = await call("/api/login", "POST", { username: "ALIREZA", password: secret });
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: "TOO_MANY_ATTEMPTS" });
+    expect((await call("/api/login", "POST", { password: secret })).status).toBe(429);
+    await login("viewer", memberPassword);
+    expect((await call("/api/me", "GET", undefined, owner)).status).toBe(200);
+  });
+
+  it("bounds rotating unknown usernames by IP and removes expired counters even after only failed attempts", async () => {
+    const now = Date.now();
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    for (let index = 0; index < 100; index++) {
+      expect((await call("/api/login", "POST", { username: `unknown-${index}`, password: "wrong" })).status).toBe(401);
+    }
+    for (let index = 100; index < 120; index++) {
+      expect((await call("/api/login", "POST", { username: `unknown-${index}`, password: "wrong" })).status).toBe(429);
+    }
+    expect(db.database.prepare("SELECT COUNT(*) count FROM seo_login_attempts").get()!.count).toBe(101);
+    vi.setSystemTime(now + 901000);
+    expect((await call("/api/login", "POST", { username: "unknown-after-window", password: "wrong" })).status).toBe(401);
+    expect(db.database.prepare("SELECT COUNT(*) count FROM seo_login_attempts").get()!.count).toBe(2);
+    expect(db.database.prepare("SELECT MIN(window_start) oldest FROM seo_login_attempts").get()!.oldest).toBe(Math.floor((now + 901000) / 1000));
+  }, 10000);
 });
 
 describe("Password hashing", () => {

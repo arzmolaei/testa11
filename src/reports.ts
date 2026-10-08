@@ -1,4 +1,4 @@
-import { formatDate, formatJalaliInput, getJalaliParts, jalaliToIso, todayIso, toIsoDate } from "./dates";
+import { formatDate, formatJalaliInput, getJalaliParts, isIsoDate, jalaliToIso, todayIso, toIsoDate } from "./dates";
 import { getProjectActions } from "./workflow";
 import type { ProjectAction } from "./workflow";
 import type { Project, Row } from "./types";
@@ -31,7 +31,8 @@ export function reportDate(value: unknown): string | null {
   if (!raw) return null;
   const iso = toIsoDate(raw);
   if (iso) return iso;
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(raw) || !toIsoDate(raw.slice(0, 10))) return null;
+  const parts = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-](\d{2}):(\d{2}))$/.exec(raw);
+  if (!parts || !isIsoDate(parts[1]) || Number(parts[2]) > 23 || Number(parts[3]) > 59 || Number(parts[4]) > 59 || parts[5] !== "Z" && (Number(parts[6]) > 23 || Number(parts[7]) > 59)) return null;
   const timestamp = new Date(raw);
   return Number.isFinite(timestamp.getTime()) ? todayIso(timestamp) : null;
 }
@@ -65,6 +66,7 @@ export function buildProjectReport(project: Project, options: ReportOptions): Pr
   const period = validateReportPeriod(options);
   const pages = new Map(project.pages.map((page) => [page.id, page]));
   const events: ReportEvent[] = [], metricsByPage = new Map<string, ReportMetric>();
+  const metricTimes = new Map<string, number>();
   const privateNotes: ProjectReportData["privateNotes"] = [];
   const exclusions = { undatedEvents: 0, undatedMetrics: 0, searchConsoleOutsidePeriod: 0 };
   const addNotes = (row: Row, title: string) => {
@@ -112,7 +114,14 @@ export function buildProjectReport(project: Project, options: ReportOptions): Pr
     const title = page ? rowName(page, "صفحه") : rowName(result, "نتیجهٔ ثبت‌شده");
     const url = text(result.url || page?.url), key = text(result.pageId) || url || result.id;
     const previous = metricsByPage.get(key);
-    if (!previous || previous.date < date || (previous.date === date && previous.id.localeCompare(result.id) < 0)) metricsByPage.set(key, { id: result.id, title, url, date, ...values });
+    // Keep timestamp precision for ordering; the rendered/filter date remains
+    // Tehran's date. A random UUID must not select an older same-day snapshot.
+    const checkedAt = text(result.lastChecked).includes("T") ? Date.parse(text(result.lastChecked)) : -Infinity;
+    const previousTime = metricTimes.get(key) ?? -Infinity;
+    if (!previous || previous.date < date || previous.date === date && (previousTime < checkedAt || previousTime === checkedAt && previous.id.localeCompare(result.id) < 0)) {
+      metricsByPage.set(key, { id: result.id, title, url, date, ...values });
+      metricTimes.set(key, checkedAt);
+    }
   }
   const metrics = [...metricsByPage.values()].sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title));
   if (options.includePrivateNotes) for (const metric of metrics) {

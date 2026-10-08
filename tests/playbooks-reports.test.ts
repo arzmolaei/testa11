@@ -61,6 +61,8 @@ describe("reports use actual dates and recorded metrics", () => {
     expect(reportDate("۱۴۰۵/۰۷/۱۵")).toBe("2026-10-07");
     expect(reportDate("2026-02-30T12:00:00Z")).toBeNull();
     expect(reportDate("not a date")).toBeNull();
+    for (const timestamp of ["2026-10-07T24:00:00Z", "2026-10-07T12:00:00", "2026-10-07T12:00:00+24:00", "2026-10-07T12:60:00Z"]) expect(reportDate(timestamp)).toBeNull();
+    expect(reportDate("2026-10-07T00:30:00+03:30")).toBe("2026-10-07");
   });
   it("filters completed tasks and actual publication inclusively, never scheduled work", () => {
     const report = buildProjectReport(project({ tasks: [
@@ -96,6 +98,16 @@ describe("reports use actual dates and recorded metrics", () => {
     expect(report.metrics[0]).toMatchObject({ id: "latest", clicks: 0, impressions: 0, ctr: 0, position: undefined, conversions: undefined });
     expect(report.exclusions.undatedMetrics).toBe(1);
     expect(reportHtml(report)).toContain("این اعداد جمع عملکرد دوره نیستند");
+  });
+  it("selects the real latest same-day timestamp independently of row IDs and input order", () => {
+    const rows = [
+      { id: "z-older", pageId: "page", lastChecked: "2026-10-06T22:00:00Z", clicks: 1 },
+      { id: "a-latest", pageId: "page", lastChecked: "2026-10-07T08:00:00+03:30", clicks: 2 },
+    ];
+    for (const results of [rows, [...rows].reverse()]) {
+      const report = buildProjectReport(project({ results }), period);
+      expect(report.metrics[0]).toMatchObject({ id: "a-latest", date: "2026-10-07", clicks: 2 });
+    }
   });
   it("keeps private notes out by default and includes only selected period records when chosen", () => {
     const source = project({ tasks: [

@@ -52,7 +52,7 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
   return <div className="bulk-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="bulk-modal" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}><header><h2>{title}</h2><button type="button" className="icon-button" aria-label="بستن" onClick={onClose}><X size={18}/></button></header>{children}</div></div>;
 }
 
-export function BulkEditWorkspace({ project, settings, onRowsChange, notify, readOnly: accessReadOnly = false }: WorkspaceProps & { readOnly?: boolean }) {
+export function BulkEditWorkspace({ project, settings, onRowsChange, notify, readOnly: accessReadOnly = false, draftScope, canRecoverLegacyDraft = false }: WorkspaceProps & { readOnly?: boolean }) {
   const [collection, setCollection] = useState<Collection>("keywords");
   const [tx, setTx] = useState<Transaction>(emptyTransaction);
   const txRef = useRef(tx);
@@ -87,6 +87,7 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
   const readOnly = accessReadOnly || !draftReady || !!recovery;
   const persist = useRef<() => void>(() => {});
   const viewport = useRef<HTMLDivElement>(null);
+  const bulkDateControl = useRef<HTMLDivElement>(null);
   const lastChecked = useRef(0);
   const focusAfter = useRef<Position | null>(null);
   const baseRows = project[collection];
@@ -129,14 +130,14 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
   useEffect(() => {
     let live = true;
     setDraftReady(false); setRecovery(null); setDraftError(""); setDraftSaved(false);
-    loadBulkDraft(project.id, collection).then((saved) => {
+    loadBulkDraft(project.id, collection, draftScope, canRecoverLegacyDraft && !accessReadOnly).then((saved) => {
       if (!live) return;
       if (saved && !validBulkDraft(saved, project.id, collection)) { setDraftError("پیش‌نویس قبلی قابل خواندن نیست؛ نسخه آن در حافظه حفظ شده است. پیش از تغییرات جدید از داده‌ها پشتیبان بگیرید."); }
       else if (saved) setRecovery(saved);
       setDraftReady(true);
     }).catch(() => { if (live) { setDraftReady(true); setDraftError("ذخیره خودکار پیش‌نویس در این مرورگر ممکن نیست؛ پیش از بستن، تغییرات را ثبت یا کپی کنید."); } });
     return () => { live = false; };
-  }, [project.id, collection]);
+  }, [project.id, collection, draftScope, canRecoverLegacyDraft]);
   const createDraft = (): SavedBulkDraft => {
     const currentTx = txRef.current;
     const baselines = new Map(currentTx.baselines);
@@ -145,13 +146,14 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
     return { version: 1, projectId: project.id, collection, savedAt: new Date().toISOString(), patches: [...currentTx.patches], additions: currentTx.additions, deleted: [...currentTx.deleted], baselines: [...baselines], editing };
   };
   persist.current = () => {
-    if (!draftReady || recovery || accessReadOnly || draftError) return;
+    if (!draftReady || recovery || draftError) return;
     const currentTx = txRef.current;
     const pending = currentTx.patches.size || currentTx.additions.length || currentTx.deleted.size || editing;
-    void saveBulkDraft(project.id, collection, pending ? createDraft() : null).then(() => setDraftSaved(!!pending)).catch(() => { setDraftError("ذخیره پیش‌نویس انجام نشد؛ فضای حافظه دستگاه را بررسی و تغییرات را پیش از بستن ثبت یا کپی کنید."); });
+    if (accessReadOnly && !pending) return;
+    void saveBulkDraft(project.id, collection, pending ? createDraft() : null, draftScope).then(() => setDraftSaved(!!pending)).catch(() => { setDraftError("ذخیره پیش‌نویس انجام نشد؛ فضای حافظه دستگاه را بررسی و تغییرات را پیش از بستن ثبت یا کپی کنید."); });
   };
   useEffect(() => {
-    if (!draftReady || recovery || accessReadOnly || draftError) return;
+    if (!draftReady || recovery || draftError) return;
     setDraftSaved(false);
     const timer = setTimeout(() => persist.current(), 250);
     return () => clearTimeout(timer);
@@ -199,6 +201,12 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
   };
   const beginEdit = (row: Row, column: Field) => {
     if (readOnly || column.calculated) return;
+    const currentTx = txRef.current;
+    const base = baseRows.find((item) => item.id === row.id);
+    if (base && !currentTx.patches.has(row.id) && !currentTx.deleted.has(row.id)) {
+      txRef.current = { ...currentTx, baselines: new Map(currentTx.baselines).set(row.id, base) };
+      setTx(txRef.current);
+    }
     setEditing({ id: row.id, key: column.key, value: column.type === "date" ? formatJalaliInput(text(row[column.key]), false) : text(row[column.key]) }); setEditError("");
   };
   const focusCell = (position: Position, extend = false) => {
@@ -216,6 +224,11 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
     if (!editing) return true;
     const column = allFields.find((f) => f.key === editing.key)!;
     try {
+      const baseline = txRef.current.baselines.get(editing.id);
+      if (baseline && fingerprint(baseRows.find((row) => row.id === editing.id)) !== fingerprint(baseline)) {
+        setEditError("این ردیف هنگام ویرایش تغییر کرده است؛ متن شما حفظ شد. آن را کپی کنید و آخرین نسخهٔ ردیف را دوباره باز کنید.");
+        return false;
+      }
       const value = parseBulkValue(column, editing.value, parseJalali);
       const row = rows.find((r) => r.id === editing.id);
       if (row && String(row[column.key] ?? "") !== String(value)) stage([{ id: row.id, key: column.key, value }]);
@@ -234,7 +247,7 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
     if (event.key === "Enter" || event.key === "F2") { event.preventDefault(); beginEdit(row, column); }
     if (event.key === "Tab") { event.preventDefault(); const next = position.col + (event.shiftKey ? -1 : 1); focusCell(next >= columns.length ? { row: position.row + 1, col: 0 } : next < 0 ? { row: position.row - 1, col: columns.length - 1 } : { ...position, col: next }); }
     if (event.key === "Escape") setRange(null);
-    if (!readOnly && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !column.calculated) { event.preventDefault(); setEditing({ id: row.id, key: column.key, value: event.key }); }
+    if (!readOnly && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !column.calculated) { event.preventDefault(); beginEdit(row, column); setEditing({ id: row.id, key: column.key, value: event.key }); }
   };
   const selectionRect = () => ({ top: Math.min(range?.start.row ?? active.row, range?.end.row ?? active.row), bottom: Math.max(range?.start.row ?? active.row, range?.end.row ?? active.row), left: Math.min(range?.start.col ?? active.col, range?.end.col ?? active.col), right: Math.max(range?.start.col ?? active.col, range?.end.col ?? active.col) });
   const editorDestination = (row: number, col: number, key: string, shift: boolean): Position => {
@@ -266,17 +279,20 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
   };
   const applyBulk = () => {
     if (readOnly || !targetIds.size || !field || !finishEdit()) return;
+    if (field.type === "date" && bulkDateControl.current?.querySelector<HTMLInputElement>("input")?.reportValidity() === false) return;
     try {
       const value = parseBulkValue(field, bulkValue, parseJalali);
-      stage(rows.filter((r) => targetIds.has(r.id) && (!onlyBlank || !text(r[field.key]).trim()) && text(r[field.key]) !== String(value)).map((row) => ({ id: row.id, key: field.key, value })));
+      stage(materialize(baseRows, txRef.current).filter((r) => targetIds.has(r.id) && (!onlyBlank || !text(r[field.key]).trim()) && text(r[field.key]) !== String(value)).map((row) => ({ id: row.id, key: field.key, value })));
       notify(`تغییر ${field.label} در پیش‌نویس آماده شد؛ برای ثبت نهایی «ذخیره تغییرات» را بزنید.`);
     } catch (error) { notify((error as Error).message); }
   };
   const fillDown = () => {
     if (readOnly || !finishEdit()) return;
     const rect = selectionRect();
-    const selectedRows = filtered.filter((row) => selectedIds.has(row.id));
-    const targets = range ? filtered.slice(rect.top, rect.bottom + 1) : selectedRows;
+    const latestRows = new Map(materialize(baseRows, txRef.current).map((row) => [row.id, row]));
+    const latestFiltered = filtered.map((row) => latestRows.get(row.id) || row);
+    const selectedRows = latestFiltered.filter((row) => selectedIds.has(row.id));
+    const targets = range ? latestFiltered.slice(rect.top, rect.bottom + 1) : selectedRows;
     const fields = range ? columns.slice(rect.left, rect.right + 1) : [columns[active.col]];
     if (targets.length < 2) { notify("حداقل دو ردیف یا یک محدوده چندردیفی انتخاب کنید؛ مقدار ردیف اول به پایین کپی می‌شود."); return; }
     const changes: BulkCellChange[] = [];
@@ -295,13 +311,17 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
     const finalRows = materialize(baseRows, transaction);
     const current = new Map(baseRows.map((row) => [row.id, row]));
     for (const [id, baseline] of transaction.baselines) {
+      if (!transaction.patches.has(id) && !transaction.deleted.has(id)) continue;
       if (fingerprint(current.get(id)) !== fingerprint(baseline)) { notify("این ردیف در نسخه دیگری تغییر کرده است؛ پیش‌نویس را کپی کنید و دوباره با داده جدید ویرایش کنید."); return; }
     }
     const edited = new Set([...transaction.patches.keys(), ...transaction.additions.map((r) => r.id)]);
     const error = validateBulkRows(collection, finalRows, edited, project.pages);
     if (error) { notify(error); setReviewOpen(false); return; }
     const before = baseRows, after = finalRows;
-    if (onRowsChange(collection, after) === false) {
+    let accepted = false;
+    try { accepted = onRowsChange(collection, after) !== false; }
+    catch (error) { setEditError(error instanceof Error ? error.message : "ثبت تغییرات انجام نشد؛ پیش‌نویس حفظ شده است."); notify(error instanceof Error ? error.message : "ثبت تغییرات انجام نشد؛ پیش‌نویس حفظ شده است."); persist.current(); return; }
+    if (!accepted) {
       const message = "ثبت تغییرات انجام نشد؛ پیش‌نویس جدول حفظ شده است. مشکل ذخیره را برطرف کنید و دوباره ثبت کنید.";
       setEditError(message); notify(message); persist.current(); return;
     }
@@ -312,7 +332,7 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
   const switchCollection = (next: Collection) => {
     if (next === collection) return;
     if ((dirty || editing) && !window.confirm("پیش‌نویس این جدول هنوز ذخیره نشده است. بدون ذخیره به جدول دیگر بروید؟")) return;
-    if (dirty || editing) void saveBulkDraft(project.id, collection, null).catch(() => {});
+    if (dirty || editing) void saveBulkDraft(project.id, collection, null, draftScope).catch(() => {});
     txRef.current = emptyTransaction();
     setCollection(next); setTx(txRef.current); setHistory([]); setSelected(new Set()); setQuery(""); setFilterField(""); setFilterValue(""); setSort({ key: "", desc: false }); setPreset("core"); setCustomColumns([]); setBulkField(next === "keywords" ? "group" : next === "pages" ? "status" : next === "content" ? "writingStatus" : "result"); setBulkValue(""); setEditing(null); setLastSave(null); setStart(0); setRange(null); setActive({ row: 0, col: 0 });
     if (viewport.current) viewport.current.scrollTop = 0;
@@ -349,10 +369,10 @@ export function BulkEditWorkspace({ project, settings, onRowsChange, notify, rea
     <div className="workspace-heading"><div><div className="eyebrow">WORKSPACE · تغییر گروهی</div><h1>تغییر گروهی</h1><p>تمام داده‌ها در یک جدول؛ انتخاب، چسباندن و ویرایش هزاران ردیف با یک بار ذخیره.</p></div><div className="action-row"><button className="btn btn-secondary" onClick={copy}><Copy size={15}/>کپی محدوده</button><button className="btn btn-primary" onClick={add} disabled={readOnly}><Plus size={16}/>ردیف جدید</button></div></div>
     <nav className="bulk-tabs" aria-label="جدول تغییر گروهی">{collections.map((item) => <button key={item.key} className={collection === item.key ? "active" : ""} onClick={() => switchCollection(item.key)} aria-pressed={collection === item.key}>{item.label}<span>{fa.format(project[item.key].length)}</span></button>)}</nav>
     {draftError && <div className="bulk-error" role="alert">{draftError}</div>}
-    {recovery && <div className="bulk-recovery" role="status"><div><strong>یک پیش‌نویس ذخیره‌نشده از قبل باقی مانده است.</strong><p>آخرین ذخیره محلی: {formatDate(recovery.savedAt)} · تغییرات پیش از ثبت نهایی بررسی می‌شوند.</p></div><div><button className="btn btn-secondary" onClick={() => downloadJson(recovery, `SEO-draft-${jalaliFileDate()}.json`)}>دانلود پیش‌نویس</button><button className="btn btn-ghost" disabled={accessReadOnly} onClick={() => { if (window.confirm("پیش‌نویس قبلی از این دستگاه حذف شود؟ برای حفظ نسخه، ابتدا آن را دانلود کنید.")) { void saveBulkDraft(project.id, collection, null).then(() => setRecovery(null)).catch(() => notify("حذف پیش‌نویس انجام نشد.")); } }}>کنارگذاشتن</button><button className="btn btn-primary" onClick={recover} disabled={accessReadOnly}>بازیابی پیش‌نویس</button></div></div>}
+    {recovery && <div className="bulk-recovery" role="status"><div><strong>یک پیش‌نویس ذخیره‌نشده از قبل باقی مانده است.</strong><p>آخرین ذخیره محلی: {formatDate(recovery.savedAt)} · تغییرات پیش از ثبت نهایی بررسی می‌شوند.</p></div><div><button className="btn btn-secondary" onClick={() => downloadJson(recovery, `SEO-draft-${jalaliFileDate()}.json`)}>دانلود پیش‌نویس</button><button className="btn btn-ghost" disabled={accessReadOnly} onClick={() => { if (window.confirm("پیش‌نویس قبلی از این دستگاه حذف شود؟ برای حفظ نسخه، ابتدا آن را دانلود کنید.")) { void saveBulkDraft(project.id, collection, null, draftScope).then(() => setRecovery(null)).catch(() => notify("حذف پیش‌نویس انجام نشد.")); } }}>کنارگذاشتن</button><button className="btn btn-primary" onClick={recover} disabled={accessReadOnly}>بازیابی پیش‌نویس</button></div></div>}
     <div className="bulk-card">
       <div className="bulk-toolbar"><label className="bulk-search"><Search size={17}/><input value={query} aria-label="جستجو در همه ردیف‌ها" placeholder="جستجو در تمام ردیف‌ها و یادداشت‌ها..." onChange={(e) => { if (finishEdit()) setQuery(e.target.value); }}/></label><div className="bulk-toolbar-controls"><select aria-label="ستون فیلتر" value={filterField} onChange={(e) => { if (finishEdit()) { setFilterField(e.target.value); setFilterValue(""); } }}><option value="">همه ردیف‌ها</option>{editableFields.filter((f) => f.type === "select" || f.key === "group" || f.key === "owner").map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}</select>{filterField && <select aria-label="مقدار فیلتر" value={filterValue} onChange={(e) => { if (finishEdit()) setFilterValue(e.target.value); }}><option value="">همه مقدارها</option>{(filter?.options || [...new Set(rows.map((r) => text(r[filterField])).filter(Boolean))].sort()).map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}</select>}<select value={preset} aria-label="نمای ستون‌ها" onChange={(e) => { if (finishEdit()) setPreset(e.target.value); }}><option value="core">ستون‌های اصلی</option>{SCHEMAS[collection].filter((section) => section.key !== "core").map((section) => <option value={section.key} key={section.key}>{section.label}</option>)}<option value="custom">ستون‌های دلخواه</option></select><button className="btn btn-ghost" onClick={() => setColumnsOpen(true)} title="انتخاب ستون‌ها" aria-label="انتخاب ستون‌ها"><Columns3 size={17}/></button></div></div>
-      <div className="bulk-change-bar"><div className="bulk-scope"><SlidersHorizontal size={16}/><select aria-label="محدوده تغییر گروهی" value={scope} onChange={(e) => setScope(e.target.value as "selected" | "filtered")}><option value="selected">انتخاب‌شده‌ها ({fa.format(selectedIds.size)})</option><option value="filtered">همه نتایج جستجو ({fa.format(filtered.length)})</option></select></div><select aria-label="فیلد تغییر گروهی" value={field?.key || ""} onChange={(e) => { setBulkField(e.target.value); setBulkValue(""); }}>{editableFields.map((column) => <option key={column.key} value={column.key}>{settings.customLabels?.[column.key] || column.label}</option>)}</select>{field?.type === "date" ? <JalaliDateInput value={parseJalali(bulkValue) || ""} onChange={(iso) => setBulkValue(formatJalaliInput(iso, false))} aria-label="مقدار تغییر گروهی"/> : field?.options || (field && referenceOptions(field)) ? <select aria-label="مقدار تغییر گروهی" value={bulkValue} onChange={(e) => setBulkValue(e.target.value)}><option value="">پاک‌کردن مقدار</option>{field.options ? field.options.map((value) => <option key={value} value={value}>{labels[value] || value}</option>) : referenceOptions(field)!.map((value) => <option key={value.value} value={value.value}>{value.label}</option>)}</select> : <input aria-label="مقدار تغییر گروهی" placeholder="مقدار جدید؛ خالی برای پاک‌کردن" value={bulkValue} onChange={(e) => setBulkValue(e.target.value)}/>}<label className="bulk-blank"><input type="checkbox" checked={onlyBlank} onChange={(e) => setOnlyBlank(e.target.checked)}/>فقط خانه‌های خالی</label><button className="btn btn-secondary" onClick={applyBulk} disabled={readOnly || !targetIds.size}>اعمال روی {fa.format(targetIds.size)} ردیف</button><button className="icon-button bulk-delete" title="حذف ردیف‌های محدوده" aria-label="حذف ردیف‌های محدوده" onClick={() => { if (finishEdit()) setDeleteOpen(true); }} disabled={readOnly || !targetIds.size}><Trash2 size={17}/></button></div>
+      <div className="bulk-change-bar"><div className="bulk-scope"><SlidersHorizontal size={16}/><select aria-label="محدوده تغییر گروهی" value={scope} onChange={(e) => setScope(e.target.value as "selected" | "filtered")}><option value="selected">انتخاب‌شده‌ها ({fa.format(selectedIds.size)})</option><option value="filtered">همه نتایج جستجو ({fa.format(filtered.length)})</option></select></div><select aria-label="فیلد تغییر گروهی" value={field?.key || ""} onChange={(e) => { setBulkField(e.target.value); setBulkValue(""); }}>{editableFields.map((column) => <option key={column.key} value={column.key}>{settings.customLabels?.[column.key] || column.label}</option>)}</select>{field?.type === "date" ? <div ref={bulkDateControl}><JalaliDateInput key={field.key} value={parseJalali(bulkValue) || ""} onChange={(iso) => setBulkValue(formatJalaliInput(iso, false))} aria-label="مقدار تغییر گروهی"/></div> : field?.options || (field && referenceOptions(field)) ? <select aria-label="مقدار تغییر گروهی" value={bulkValue} onChange={(e) => setBulkValue(e.target.value)}><option value="">پاک‌کردن مقدار</option>{field.options ? field.options.map((value) => <option key={value} value={value}>{labels[value] || value}</option>) : referenceOptions(field)!.map((value) => <option key={value.value} value={value.value}>{value.label}</option>)}</select> : <input aria-label="مقدار تغییر گروهی" placeholder="مقدار جدید؛ خالی برای پاک‌کردن" value={bulkValue} onChange={(e) => setBulkValue(e.target.value)}/>}<label className="bulk-blank"><input type="checkbox" checked={onlyBlank} onChange={(e) => setOnlyBlank(e.target.checked)}/>فقط خانه‌های خالی</label><button className="btn btn-secondary" onClick={applyBulk} disabled={readOnly || !targetIds.size}>اعمال روی {fa.format(targetIds.size)} ردیف</button><button className="icon-button bulk-delete" title="حذف ردیف‌های محدوده" aria-label="حذف ردیف‌های محدوده" onClick={() => { if (finishEdit()) setDeleteOpen(true); }} disabled={readOnly || !targetIds.size}><Trash2 size={17}/></button></div>
       <div className="bulk-grid-meta"><span><strong>{fa.format(filtered.length)}</strong> ردیف از {fa.format(rows.length)} · {fa.format(selectedIds.size)} انتخاب‌شده{selectedIds.size > 0 && <button className="bulk-text-link" onClick={() => setSelected(new Set())}>لغو انتخاب</button>}</span><div><button className="bulk-text-link" onClick={() => setSelected(new Set(filtered.map((row) => row.id)))}>انتخاب همه {fa.format(filtered.length)} ردیف</button><button className="bulk-text-link" onClick={fillDown} disabled={readOnly}><ArrowDownToLine size={14}/>پرکردن به پایین</button><button className="bulk-text-link" onClick={() => { if (finishEdit()) { setPasteText(""); setPastePlan(null); setPasteOpen(true); } }} disabled={readOnly || !filtered.length}><FileSpreadsheet size={14}/>چسباندن از شیت</button>{collection === "keywords" && <KeywordSuggestions disabled={readOnly} applyLabel="افزودن به پیش‌نویس جدول" project={{ ...project, keywords: rows }} settings={settings} selectedIds={selectedIds} notify={notify} onRowsChange={(key, updated) => { if (readOnly || key !== "keywords") return false; const byId = new Map(rows.map((row) => [row.id, row])); const changes: BulkCellChange[] = []; updated.forEach((row) => { const old = byId.get(row.id); if (!old) return; Object.entries(row).forEach(([key, value]) => { if (key !== "id" && text(old[key]) !== text(value)) changes.push({ id: row.id, key, value: value ?? "" }); }); }); stage(changes); return true; }}/>}</div></div>
       {editError && <div role="alert" className="bulk-error">{editError}</div>}
       <div className="bulk-grid-scroll" ref={viewport} onScroll={(e) => { const top = Math.max(0, Math.floor((e.currentTarget.scrollTop - 42) / ROW_HEIGHT) - 3); setStart(Math.min(top, Math.max(0, filtered.length - 1))); }} onPaste={onPaste} onCopy={(e) => { if (editing) return; e.preventDefault(); e.clipboardData.setData("text/plain", clipboardText()); }}>

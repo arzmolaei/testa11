@@ -5,8 +5,8 @@ import { formatDate, formatJalaliInput, jalaliFileDate } from "../dates";
 import type { Project, Row } from "../types";
 import {
   buildSearchConsoleInsights, createSearchConsoleDataset, detectSearchConsoleMapping,
-  prepareSearchConsoleImport, SEARCH_CONSOLE_BYTES_LIMIT, SEARCH_CONSOLE_FIELDS, SEARCH_CONSOLE_ROW_LIMIT,
-  searchConsoleComparisonReason, searchConsoleInsightSource, searchConsolePeriodDays, validateSearchConsoleData,
+  prepareSearchConsoleImport, SEARCH_CONSOLE_BYTES_LIMIT, SEARCH_CONSOLE_COLUMN_LIMIT, SEARCH_CONSOLE_FIELDS, SEARCH_CONSOLE_ROW_LIMIT,
+  searchConsoleComparisonReason, searchConsoleDatasetCsv, searchConsoleInsightSource, searchConsolePeriodDays, validateSearchConsoleData,
 } from "../search-console";
 import type { SearchConsoleData, SearchConsoleDataset, SearchConsoleMapping, SearchConsoleInsight } from "../search-console";
 import { JalaliDateInput } from "./JalaliDateInput";
@@ -22,15 +22,9 @@ const dimensionLabel = { query: "عبارت", page: "صفحه", "query-page": "�
 const kindLabel = { "low-ctr": "نرخ کلیک", "near-first-page": "فرصت جایگاه", decline: "افت کلیک", "query-page-overlap": "همپوشانی احتمالی" };
 
 function exportDataset(dataset: SearchConsoleDataset) {
-  const escape = (value: unknown) => {
-    let text = String(value ?? "");
-    if (/^[\s\r\n]*[=+@-]/.test(text)) text = `'${text}`;
-    return `"${text.replace(/"/g, '""')}"`;
-  };
-  const matrix: unknown[][] = [["عبارت جست‌وجو", "نشانی صفحه", "کلیک", "نمایش", "نرخ کلیک", "میانگین جایگاه", "دستگاه", "کشور", "شروع دوره", "پایان دوره"]];
-  for (const row of dataset.rows) matrix.push([row.query, row.page, row.clicks, row.impressions, row.impressions ? row.clicks / row.impressions * 100 : 0, row.position, row.device, row.country, formatJalaliInput(dataset.periodStart), formatJalaliInput(dataset.periodEnd)]);
-  const url = URL.createObjectURL(new Blob(["\ufeff", matrix.map((row) => row.map(escape).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" }));
-  const anchor = document.createElement("a"); anchor.href = url; anchor.download = `Alireza-SEO-Search-Console-${jalaliFileDate()}.csv`; anchor.click();
+  const url = URL.createObjectURL(new Blob([searchConsoleDatasetCsv(dataset)], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a"); anchor.href = url; anchor.download = `Alireza-SEO-Search-Console-${jalaliFileDate()}.csv`;
+  document.body.appendChild(anchor); anchor.click(); anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
@@ -72,7 +66,7 @@ export function SearchConsoleWorkspace({ project, onProjectChange, notify, readO
         const { default: ExcelJS } = await import("exceljs");
         const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(await file.arrayBuffer());
         sheets = workbook.worksheets.slice(0, 20).map((sheet) => {
-          if (sheet.rowCount > SEARCH_CONSOLE_ROW_LIMIT + 1 || sheet.columnCount > 64) return { name: `${sheet.name} (بیش از ظرفیت)`, matrix: [] };
+          if (sheet.rowCount > SEARCH_CONSOLE_ROW_LIMIT + 1 || sheet.columnCount > SEARCH_CONSOLE_COLUMN_LIMIT) return { name: `${sheet.name} (بیش از ظرفیت)`, matrix: [] };
           const matrix: string[][] = [];
           for (let rowIndex = 1; rowIndex <= sheet.rowCount; rowIndex++) {
             const cells: string[] = [];
@@ -89,6 +83,7 @@ export function SearchConsoleWorkspace({ project, onProjectChange, notify, readO
       } else if (/\.(csv|tsv|txt)$/i.test(file.name)) sheets = [{ name: file.name, matrix: parseCsv(await file.text()) }];
       else throw new Error("فایل CSV، TSV یا XLSX انتخاب کنید.");
       if (!sheets.length) throw new Error("فایل کاربرگ ندارد.");
+      if (sheets.some((sheet) => (sheet.matrix[0]?.length || 0) > SEARCH_CONSOLE_COLUMN_LIMIT)) throw new Error("فایل حداکثر ۶۴ ستون داشته باشد؛ فقط ستون‌های گزارش عملکرد را نگه دارید.");
       const selected = sheets.findIndex((sheet) => {
         const mapping = detectSearchConsoleMapping(sheet.matrix[0] || []);
         return sheet.matrix.length > 1 && mapping.clicks !== undefined && mapping.impressions !== undefined && (mapping.query !== undefined || mapping.page !== undefined);

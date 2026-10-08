@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { parseCsv } from "../src/domain";
 import {
   aggregateSearchConsoleRows, buildSearchConsoleInsights, createSearchConsoleDataset,
   detectSearchConsoleMapping, normalizeSearchConsoleUrl, parseSearchConsoleNumber,
   prepareSearchConsoleImport, searchConsoleComparisonReason, searchConsolePageId,
-  searchConsoleInsightSource, searchConsolePeriodDays, validateSearchConsoleData,
+  searchConsoleDatasetCsv, searchConsoleInsightSource, searchConsolePeriodDays, validateSearchConsoleData,
 } from "../src/search-console";
 import type { SearchConsoleDataset, SearchConsoleRow } from "../src/search-console";
 
@@ -23,6 +24,34 @@ describe("local Search Console import and evidence", () => {
     expect(parseSearchConsoleNumber("1 000", true)).toBe(1000);
     for (const value of ["1,2", "10,00", "-5", "+2", "1e5", "Infinity", "NaN", "2k", "", "3.5.4", "۵ درصد"]) expect(parseSearchConsoleNumber(value)).toBeNull();
     expect(parseSearchConsoleNumber("1.5", true)).toBeNull();
+  });
+  it("round-trips app CSV exports with only their real dimensions and preserves device/country", () => {
+    for (const dimension of ["page", "query", "query-page"] as const) {
+      const original = row({ query: dimension === "page" ? undefined : "دوربین", page: dimension === "query" ? undefined : "https://example.com/camera", device: "mobile", country: "ir" });
+      const source = dataset({ dimension, rows: [original] });
+      const csv = searchConsoleDatasetCsv(source), matrix = parseCsv(csv);
+      const imported = preview(matrix);
+      expect(imported.errorCount).toBe(0);
+      expect(imported.dimension).toBe(dimension);
+      expect(imported.rows[0]).toMatchObject({ clicks: original.clicks, impressions: original.impressions, position: original.position, device: "mobile", country: "ir" });
+      expect(imported.rows[0].query).toBe(original.query);
+      expect(imported.rows[0].page).toBe(original.page);
+      expect(csv).toContain("۱۴۰۵");
+      expect(csv).not.toContain("2026-09-01");
+    }
+  });
+  it("reimports safe aggregated large counts and tiny CTR without scientific notation", () => {
+    const source = dataset({ rows: [row({ clicks: 1, impressions: Number.MAX_SAFE_INTEGER })] });
+    const matrix = parseCsv(searchConsoleDatasetCsv(source));
+    expect(matrix[1][3]).not.toMatch(/e[-+]/i);
+    const imported = preview(matrix);
+    expect(imported.errorCount).toBe(0);
+    expect(imported.rows[0].impressions).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseSearchConsoleNumber(String(Number.MAX_SAFE_INTEGER + 1), true)).toBeNull();
+  });
+  it("guards CSV formulas after control characters in untrusted GSC strings", () => {
+    const csv = searchConsoleDatasetCsv(dataset({ dimension: "query", rows: [row({ page: undefined, query: '\u0000=HYPERLINK("https://evil.test")' })] }));
+    expect(csv).toContain('"\'\u0000=HYPERLINK(""https://evil.test"")"');
   });
   it("aggregates duplicate dimension rows using impressions to weight position and derives CTR", () => {
     const parsed = preview([["Page", "Clicks", "Impressions", "CTR", "Position"], ["https://example.com/a/", "10", "100", "10%", "2"], ["https://example.com/a", "20", "900", "2.22%", "10"]]);
@@ -65,6 +94,9 @@ describe("local Search Console import and evidence", () => {
     expect(prepareSearchConsoleImport([["Clicks", "Impressions"], ["1", "5"]], { clicks: 0, impressions: 1 }).errorCount).toBe(1);
     expect(prepareSearchConsoleImport([["Query", "Clicks"], ["a", "1"]], { query: 0, clicks: 1, impressions: 1 }).errorCount).toBe(1);
     expect(preview([["Date", "Clicks", "Impressions"], ["2026-09-01", "1", "10"]]).errorCount).toBeGreaterThan(0);
+    const wide = prepareSearchConsoleImport([["Query", "Clicks", "Impressions", ...Array.from({ length: 62 }, () => "unused")], ["a", "1", "10"]], { query: 0, clicks: 1, impressions: 2 });
+    expect(wide.rows).toEqual([]);
+    expect(wide.errors[0].message).toMatch(/۶۴ ستون/);
   });
   it("checks page URLs and keeps domains, protocols and search parameters distinct", () => {
     const pages = [{ id: "camera", url: "https://example.com/camera/" }, { id: "foreign", url: "https://other.com/camera" }];
@@ -115,6 +147,7 @@ describe("local Search Console import and evidence", () => {
     expect(searchConsoleComparisonReason(dataset(), previous({ periodEnd: "2026-08-29" }))).toMatch(/طول/);
     expect(searchConsoleComparisonReason(dataset(), previous({ periodStart: "2026-09-01", periodEnd: "2026-09-28" }))).toMatch(/همپوشانی/);
     expect(searchConsoleComparisonReason(dataset({ sourceFilters: "mobile" }), previous({ sourceFilters: "desktop" }))).toMatch(/فیلتر/);
+    expect(searchConsoleComparisonReason(dataset({ sourceFilters: "Page: /Products" }), previous({ sourceFilters: "Page: /products" }))).toMatch(/فیلتر/);
     expect(searchConsoleComparisonReason(dataset({ rows: [row({ device: "mobile" })] }), previous())).toMatch(/ستون/);
   });
   it("builds evidence-based CTR, rank and decline opportunities with stable IDs and real page links", () => {
@@ -145,6 +178,10 @@ describe("local Search Console import and evidence", () => {
     const later = buildSearchConsoleInsights({ pages: [], searchConsole: { current: dataset({ periodStart: "2026-10-01", periodEnd: "2026-10-28" }) } })[0];
     expect(first.id).toBe(later.id);
     expect(searchConsoleInsightSource(first)).not.toBe(searchConsoleInsightSource(later));
+    const filtered = buildSearchConsoleInsights({ pages: [], searchConsole: { current: dataset({ sourceFilters: "web, mobile" }) } })[0];
+    const otherFilter = buildSearchConsoleInsights({ pages: [], searchConsole: { current: dataset({ sourceFilters: "images, mobile" }) } })[0];
+    expect(searchConsoleInsightSource(first)).not.toBe(searchConsoleInsightSource(filtered));
+    expect(searchConsoleInsightSource(filtered)).not.toBe(searchConsoleInsightSource(otherFilter));
   });
   it("never invents declines for censored or missing rows, zero baselines or mismatched filters", () => {
     expect(buildSearchConsoleInsights({ pages: [], searchConsole: { current: dataset(), previous: previous({ rows: [row({ page: "https://example.com/other" })] }) } }).some((insight) => insight.kind === "decline")).toBe(false);

@@ -159,6 +159,24 @@ describe("local page-intent planning", () => {
     expect(result.project.keywords[2]).toEqual(current.keywords[2]);
   });
 
+  it("does not restore a manual target that was cleared after the preview", () => {
+    const source = project([{ id: "linked", keyword: "خرید دوربین", targetPage: "a" }]);
+    source.pages = [{ id: "a", pkw: "دوربین", pageType: "دسته‌بندی محصول" }];
+    const candidates = analyzePageCandidates(source);
+    const current = { ...source, keywords: [{ ...source.keywords[0], targetPage: "" }] };
+    expect(buildPagePlan(current, candidates, selected(candidates))).toMatchObject({ project: current, linkedKeywords: 0, updatedPages: 0, skipped: 1 });
+  });
+
+  it("chooses a remaining eligible primary when the original primary was excluded", () => {
+    const source = project(["خرید دوربین", "قیمت دوربین"]);
+    const candidates = analyzePageCandidates(source);
+    const current = { ...source, keywords: [{ ...source.keywords[0], decision: "Exclude" }, source.keywords[1]] };
+    const result = buildPagePlan(current, candidates, selected(candidates));
+    expect(result).toMatchObject({ createdPages: 1, linkedKeywords: 1, skipped: 1 });
+    expect(result.project.pages[0].pkw).toBe("قیمت دوربین");
+    expect(result.project.keywords[0].targetPage).toBeUndefined();
+  });
+
   it("preserves invalid legacy targets and rejects missing requested destinations without creating data", () => {
     const source = project([{ id: "a", keyword: "خرید دوربین", targetPage: "deleted-page" }]);
     const candidates = analyzePageCandidates(source);

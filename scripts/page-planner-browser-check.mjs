@@ -5,8 +5,8 @@ import { chromium } from "playwright";
 
 // An isolated, synthetic React harness exercises the planner without accessing a live workspace.
 const harness = `<!doctype html><html lang="fa" dir="rtl"><head><link rel="icon" href="data:,"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module">
-import React from '/node_modules/.vite/deps/react.js';const {useEffect,useState}=React;
-import ReactDOM from '/node_modules/.vite/deps/react-dom_client.js';const {createRoot}=ReactDOM;
+import React from 'react';const {useEffect,useState}=React;
+import ReactDOM from 'react-dom/client';const {createRoot}=ReactDOM;
 import {PagePlanner} from '/src/components/PagePlanner.tsx';
 import {createProject} from '/src/domain.ts';
 import '/src/styles.css';import '/src/dark-theme.css';import '/node_modules/@fontsource/vazirmatn/400.css';
@@ -14,12 +14,13 @@ function fixture(){const p=createProject('آزمون برنامه صفحات');p
 for(let group=0;group<100;group++)for(let row=0;row<20;row++)p.keywords.push({id:'model-'+group+'-'+row,keyword:(row%2?'خرید':'قیمت')+' دوربین مدل M-'+group,volume:100+row,decision:'Keep'});
 p.keywords.push({id:'blog-a',keyword:'آموزش نصب دوربین مداربسته',volume:100,decision:'Keep'},{id:'blog-b',keyword:'نحوه نصب دوربین مداربسته',volume:90,decision:'Keep'},{id:'camera-a',keyword:'دوربین مداربسته',volume:500,decision:'Keep'},{id:'camera-b',keyword:'خرید دوربین مداربسته',volume:400,decision:'Keep'},{id:'manual',keyword:'دوربین داهوا',group:'تصمیم دستی',intent:'اطلاعاتی',notes:'حفظ شود',decision:'Keep'});
 p.pages=[{id:'existing-page',pageId:'P-001',target:'دسته دوربین',pkw:'دوربین مداربسته',pageType:'دسته‌بندی محصول',url:'https://example.test/cameras/',notes:'اطلاعات دستی'}];p.content=[];p.results=[];return p;}
-function Harness(){const [project,setProject]=useState(fixture),[readOnly,setReadOnly]=useState(false),[message,setMessage]=useState(''),[mounted,setMounted]=useState(true);useEffect(()=>{window.__project=project;window.__mutate=()=>setProject(p=>({...p,name:p.name+' جدید'}));window.__readonly=value=>setReadOnly(value);window.__mounted=value=>setMounted(value);},[project]);return React.createElement('main',{style:{maxWidth:1300,margin:'auto',padding:20}},mounted?React.createElement(PagePlanner,{project,onProjectChange:next=>{if(window.__rejectPlan)return false;setProject(next);return true;},notify:setMessage,readOnly}):null,React.createElement('output',{'data-test-notice':true},message));}
+function Harness(){const [project,setProject]=useState(fixture),[readOnly,setReadOnly]=useState(false),[message,setMessage]=useState(''),[mounted,setMounted]=useState(true),[draftScope,setDraftScope]=useState('local-development');window.__scope=setDraftScope;useEffect(()=>{window.__project=project;window.__mutate=()=>setProject(p=>({...p,name:p.name+' جدید'}));window.__readonly=value=>setReadOnly(value);window.__mounted=value=>setMounted(value);},[project]);return React.createElement('main',{style:{maxWidth:1300,margin:'auto',padding:20}},mounted?React.createElement(PagePlanner,{project,draftScope,canRecoverLegacyDraft:draftScope==='local-development',onProjectChange:next=>{if(window.__rejectPlan)return false;setProject(next);return true;},notify:setMessage,readOnly}):null,React.createElement('output',{'data-test-notice':true},message));}
 createRoot(document.getElementById('root')).render(React.createElement(Harness));
 </script></body></html>`;
 
 const port = Number(process.env.PLANNER_QA_PORT || 5188);
 const server = await createServer({
+  cacheDir: "/tmp/seo-planner-audit-cache",
   server: { host: "127.0.0.1", port, strictPort: true, hmr: false, watch: { ignored: ["**"] } },
   plugins: [{ name: "planner-qa-harness", configureServer(instance) { instance.middlewares.use(async (request, response, next) => {
     if (!request.url?.startsWith("/__planner_qa__")) return next();
@@ -92,6 +93,43 @@ try {
   await cards.first().locator(".planner-fields input").first().fill(originalLabel);
   await page.getByLabel("جست‌وجوی پیشنهادهای صفحه").fill("");
   check("IndexedDB recovers the latest staged group edit even when unmounted before the debounce finishes");
+
+  await page.evaluate(() => window.__scope("member"));
+  await page.waitForFunction(() => !document.querySelector(".planner-fields input")?.disabled && !document.querySelector(".page-planner")?.hasAttribute("data-dirty"));
+  assert.equal(await page.getByText("پیش‌نویس قبلی شما بازیابی شد.", { exact: false }).count(), 0);
+  assert.equal(await cards.locator('input[type="checkbox"]:checked').count(), 0);
+  await page.evaluate(() => window.__scope("local-development"));
+  await page.getByText("پیش‌نویس قبلی شما بازیابی شد.", { exact: false }).waitFor();
+  assert.equal((await project()).pages.length, 1);
+  check("Switching account scope resets private planner choices and restores only the original account's draft");
+
+  await page.evaluate(() => window.__mounted(false));
+  await page.locator(".page-planner").waitFor({ state: "detached" });
+  await page.waitForFunction(() => new Promise(resolve => {
+    const request = indexedDB.open("seo-page-plans-v1", 1);
+    request.onsuccess = () => {
+      const db = request.result, tx = db.transaction("drafts", "readwrite"), store = tx.objectStore("drafts");
+      const key = JSON.stringify(["local-development", "planner-fixture-project"]), read = store.get(key);
+      let found = false;
+      read.onsuccess = () => { if (read.result) { found = true; store.put(read.result, "planner-fixture-project"); store.delete(key); } };
+      tx.oncomplete = () => { db.close(); resolve(found); };
+    };
+  }));
+  await page.evaluate(() => { window.__scope("member"); window.__mounted(true); });
+  await page.waitForFunction(() => !document.querySelector(".planner-fields input")?.disabled && !document.querySelector(".page-planner")?.hasAttribute("data-dirty"));
+  assert.equal(await page.getByText("پیش‌نویس قبلی شما بازیابی شد.", { exact: false }).count(), 0);
+  await page.evaluate(() => window.__scope("local-development"));
+  await page.getByText("پیش‌نویس قبلی شما بازیابی شد.", { exact: false }).waitFor();
+  const migrated = await page.evaluate(() => new Promise(resolve => {
+    const request = indexedDB.open("seo-page-plans-v1", 1);
+    request.onsuccess = () => {
+      const db = request.result, store = db.transaction("drafts").objectStore("drafts");
+      const legacy = store.get("planner-fixture-project"), scoped = store.get(JSON.stringify(["local-development", "planner-fixture-project"]));
+      scoped.onsuccess = () => { resolve({ legacy: legacy.result ?? null, scoped: scoped.result }); db.close(); };
+    };
+  }));
+  assert.equal(migrated.legacy, null); assert.equal(migrated.scoped.projectId, "planner-fixture-project");
+  check("Owner-only legacy planner migration preserves the valid draft atomically without exposing it to another account");
 
   await page.getByLabel("فیلتر پیشنهادهای صفحه").selectOption("blog");
   const blog = cards.filter({ hasText: "آموزش نصب دوربین مداربسته" });

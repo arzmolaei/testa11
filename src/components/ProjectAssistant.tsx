@@ -22,7 +22,7 @@ const text = (value: unknown) => String(value ?? "");
 const number = (value: number) => value.toLocaleString("fa-IR");
 const priorityLabels: Record<string, string> = { P0: "اولویت فوری", P1: "اولویت بالا", P2: "اولویت عادی" };
 const freshTask = (): Row => ({ id: uid(), title: "", status: "open", priority: "P2", dueDate: "", pageId: "", notes: "" });
-const targetView = (task: Row): ActionView => task.contentId ? "content" : task.keywordId ? "keywords" : "pages";
+const targetView = (task: Row): ActionView => ["keywords", "pages", "content", "results", "bulk"].includes(text(task.view)) ? text(task.view) as ActionView : task.contentId ? "content" : task.keywordId ? "keywords" : /^(gsc:|result:)/.test(text(task.source)) ? "results" : "pages";
 const targetId = (task: Row | ProjectAction) => text(task.contentId || task.keywordId || task.pageId) || undefined;
 
 export function ProjectAssistant({ project, onProjectChange, onNavigate, readOnly = false, draftScope = "local-development", notify }: Props) {
@@ -34,13 +34,16 @@ export function ProjectAssistant({ project, onProjectChange, onNavigate, readOnl
   const [draftReady, setDraftReady] = useState(false);
   const [draftError, setDraftError] = useState("");
   const baseline = useRef<Row | null>(null);
+  const draftIdentity = useRef(JSON.stringify([draftScope, project.id]));
   const latestDraft = useRef<{ projectId: string; scope: string; ready: boolean; value: AssistantDraft | null }>({ projectId: project.id, scope: draftScope, ready: false, value: null });
   const [visible, setVisible] = useState(40);
   const today = todayIso();
   const actions = useMemo(() => getProjectActions(project, today), [project, today]);
-  latestDraft.current = { projectId: project.id, scope: draftScope, ready: draftReady, value: draft ? { version: 1, projectId: project.id, scope: draftScope, savedAt: new Date().toISOString(), row: draft, baseline: baseline.current } : recovery };
+  if (draftIdentity.current === JSON.stringify([draftScope, project.id])) latestDraft.current = { projectId: project.id, scope: draftScope, ready: draftReady && !draftError, value: draft ? { version: 1, projectId: project.id, scope: draftScope, savedAt: new Date().toISOString(), row: draft, baseline: baseline.current } : recovery };
   useEffect(() => {
     let canceled = false;
+    draftIdentity.current = JSON.stringify([draftScope, project.id]);
+    latestDraft.current = { projectId: project.id, scope: draftScope, ready: false, value: null };
     setDraft(null); baseline.current = null; setRecovery(null); setDraftReady(false); setDraftError(""); setArchive(false); setVisible(40);
     loadAssistantDraft(project.id, draftScope).then((saved) => { if (!canceled) setRecovery(saved); })
       .catch(() => { if (!canceled) setDraftError("ذخیرهٔ خودکار پیش‌نویس روی این دستگاه در دسترس نیست؛ تا ثبت کار، فرم را باز نگه دارید."); })
@@ -48,10 +51,10 @@ export function ProjectAssistant({ project, onProjectChange, onNavigate, readOnl
     return () => { canceled = true; };
   }, [project.id, draftScope]);
   useEffect(() => {
-    if (!draftReady) return;
+    if (!draftReady || draftError || readOnly && !latestDraft.current.value) return;
     const timer = window.setTimeout(() => { saveAssistantDraft(project.id, draftScope, latestDraft.current.value).catch(() => setDraftError("پیش‌نویس روی این دستگاه ذخیره نشد؛ فرم را تا ثبت کار باز نگه دارید.")); }, 200);
     return () => window.clearTimeout(timer);
-  }, [project.id, draftScope, draftReady, draft, recovery]);
+  }, [project.id, draftScope, draftReady, draftError, readOnly, draft, recovery]);
   useEffect(() => () => {
     const latest = latestDraft.current;
     if (latest.projectId === project.id && latest.scope === draftScope && latest.ready) void saveAssistantDraft(project.id, draftScope, latest.value).catch(() => {});
@@ -84,7 +87,7 @@ export function ProjectAssistant({ project, onProjectChange, onNavigate, readOnl
   function track(action: ProjectAction, status: "open" | "done" | "dismissed") {
     if (readOnly) return;
     if (tasks.some((task) => task.source === action.id)) { notify("این پیشنهاد قبلاً در کارهای پروژه ثبت شده است."); return; }
-    const row: Row = { id: uid(), title: action.title, status, priority: action.priority, notes: action.reason, source: action.id, createdAt: today, ...(status === "done" ? { completedAt: today } : {}), ...(action.pageId ? { pageId: action.pageId } : {}), ...(action.contentId ? { contentId: action.contentId } : {}), ...(action.keywordId ? { keywordId: action.keywordId } : {}) };
+    const row: Row = { id: uid(), title: action.title, status, priority: action.priority, notes: action.reason, source: action.id, view: action.view, createdAt: today, ...(status === "done" ? { completedAt: today } : {}), ...(action.pageId ? { pageId: action.pageId } : {}), ...(action.contentId ? { contentId: action.contentId } : {}), ...(action.keywordId ? { keywordId: action.keywordId } : {}) };
     if (!saveTasks([...tasks, row])) return;
     notify(status === "open" ? "پیشنهاد در کارهای پروژه ثبت شد." : status === "done" ? "بررسی این پیشنهاد انجام‌شده ثبت شد." : "پیشنهاد کنار گذاشته شد؛ از کارهای بسته قابل بازگرداندن است.");
   }
@@ -130,7 +133,7 @@ export function ProjectAssistant({ project, onProjectChange, onNavigate, readOnl
       <label className="field assistant-title-field"><span>عنوان کار</span><input autoFocus disabled={readOnly} required maxLength={200} aria-label="عنوان کار پروژه" value={text(draft.title)} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="مثلاً بررسی عنوان صفحهٔ دسته‌بندی"/></label>
       <label className="field"><span>اولویت</span><select disabled={readOnly} aria-label="اولویت کار" value={text(draft.priority)} onChange={(event) => setDraft({ ...draft, priority: event.target.value })}>{Object.entries(priorityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <label className="field"><span>تاریخ انجام</span><JalaliDateInput disabled={readOnly} value={text(draft.dueDate)} onChange={(dueDate) => setDraft({ ...draft, dueDate })} aria-label="تاریخ انجام کار"/></label>
-      <label className="field assistant-title-field"><span>صفحهٔ مرتبط، اختیاری</span><select disabled={readOnly} aria-label="صفحهٔ مرتبط با کار" value={text(draft.pageId)} onChange={(event) => setDraft({ ...draft, pageId: event.target.value })}><option value="">بدون صفحهٔ مرتبط</option>{project.pages.map((page) => <option key={page.id} value={page.id}>{text(page.target || page.pkw || page.pageId) || "صفحهٔ بدون نام"}</option>)}</select></label>
+      <label className="field assistant-title-field"><span>صفحهٔ مرتبط، اختیاری</span><select disabled={readOnly} aria-label="صفحهٔ مرتبط با کار" value={text(draft.pageId)} onChange={(event) => setDraft({ ...draft, pageId: event.target.value })}><option value="">بدون صفحهٔ مرتبط</option>{draft.pageId && !project.pages.some((page) => page.id === draft.pageId) && <option value={text(draft.pageId)} disabled>صفحهٔ حذف‌شده؛ یک صفحهٔ دیگر انتخاب کنید</option>}{project.pages.map((page) => <option key={page.id} value={page.id}>{text(page.target || page.pkw || page.pageId) || "صفحهٔ بدون نام"}</option>)}</select></label>
       <label className="field assistant-title-field"><span>یادداشت و دلیل</span><textarea disabled={readOnly} maxLength={3000} rows={3} aria-label="یادداشت کار" value={text(draft.notes)} onChange={(event) => setDraft({ ...draft, notes: event.target.value })}/></label>
       <div className="assistant-form-actions"><button type="button" className="btn btn-secondary" onClick={discardDraft}>انصراف</button><button className="btn btn-primary" type="submit" disabled={readOnly}><Check size={16}/>ذخیرهٔ کار</button></div>
     </form>}

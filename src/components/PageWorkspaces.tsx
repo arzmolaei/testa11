@@ -24,11 +24,14 @@ import {
   nextResult,
   fieldValue,
   normalizeKeyword,
+  resultLookup,
 } from "../domain";
 import type { Field, Row, WorkspaceProps } from "../types";
 import { formatDate, getJalaliParts, JALALI_MONTHS, JALALI_WEEKDAYS, jalaliMonthGrid, todayIso, toIsoDate } from "../dates";
 import { JalaliDateInput } from "./JalaliDateInput";
 import { buildBrief } from "../workflow";
+import { useRowDraft } from "../row-draft";
+import { RowDraftRecovery } from "./RowDraftRecovery";
 import "./page-workspaces.css";
 
 type WorkspaceKind = "pages" | "content" | "results";
@@ -300,6 +303,7 @@ function RowWorkspace({
   focusRowId,
   onFocusHandled,
   onNavigate,
+  draftScope = "local-development",
 }: WorkspaceProps & { kind: WorkspaceKind }) {
   const rows = project[kind];
   const info = config[kind];
@@ -312,6 +316,8 @@ function RowWorkspace({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [draft, setDraft] = useState<Row | null>(null);
   const draftBaseline = useRef<string | null>(null);
+  const draftOriginalRow = useRef<Row | null>(null);
+  const draftInitial = useRef<Row | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
@@ -319,6 +325,9 @@ function RowWorkspace({
   const [calendarMonth, setCalendarMonth] = useState(() => getJalaliParts(todayIso())!);
   const [bulkStatus, setBulkStatus] = useState("");
   const [comparison, setComparison] = useState(false);
+  const formDraft = useRowDraft({ projectId: project.id, collection: kind, scope: draftScope, readOnly,
+    draft, baseline: draftOriginalRow.current, initial: draftInitial.current, creating,
+    dirty: !!draft && rowFingerprint(draft) !== rowFingerprint(draftInitial.current || { id: draft.id }) });
   const pageMap = useMemo(() => {
     const map = new Map<string, Row>();
     project.pages.forEach((row) => {
@@ -341,8 +350,8 @@ function RowWorkspace({
     return { map, ambiguous };
   }, [project.keywords]);
   const resultMap = useMemo(
-    () => new Map(project.results.map((row) => [text(row.pageId), row])),
-    [project.results],
+    () => resultLookup(project.results, project.pages),
+    [project.results, project.pages],
   );
   const resolvePage = (row: Row) =>
     pageMap.get(text(kind === "content" ? row.targetPage : row.pageId));
@@ -385,14 +394,11 @@ function RowWorkspace({
     setPage(1);
   }, [project.id, kind]);
   useEffect(() => {
-    if (!focusRowId) return;
+    if (!focusRowId || !formDraft.ready || formDraft.recovery) return;
     const row = rows.find((item) => item.id === focusRowId);
-    if (row) { setDraft({ ...row }); setCreating(false); setError(""); }
+    if (row) { draftBaseline.current = rowFingerprint(row); draftOriginalRow.current = { ...row }; draftInitial.current = { ...row }; setDraft({ ...row }); setCreating(false); setError(""); }
     onFocusHandled?.();
-  }, [focusRowId, rows, onFocusHandled]);
-  useEffect(() => {
-    draftBaseline.current = draft && !creating ? rowFingerprint(rows.find((row) => row.id === draft.id) || { id: draft.id }) : null;
-  }, [draft?.id, creating]);
+  }, [focusRowId, rows, onFocusHandled, formDraft.ready, formDraft.recovery]);
   useEffect(() => {
     setPage(1);
   }, [query, filter, priorityFilter, sortKey, sortDirection]);
@@ -456,24 +462,27 @@ function RowWorkspace({
   const statusOptions =
     (LISTS as Record<string, string[]>)[info.statusList] || [];
   const edit = (row: Row) => {
+    if (!formDraft.ready || formDraft.recovery) { notify("ابتدا پیش‌نویس قبلی را بازیابی یا کنار بگذارید."); return; }
     const copy = { ...row };
     if (kind !== "pages") {
       const key = kind === "content" ? "targetPage" : "pageId";
       const linked = pageMap.get(text(row[key]));
       if (linked) copy[key] = linked.id;
     }
+    draftBaseline.current = rowFingerprint(row); draftOriginalRow.current = { ...row }; draftInitial.current = { ...copy };
     setDraft(copy);
     setCreating(false);
     setError("");
   };
   const create = () => {
+    if (!formDraft.ready || formDraft.recovery) { notify("ابتدا پیش‌نویس قبلی را بازیابی یا کنار بگذارید."); return; }
     if (rows.length >= ROW_LIMIT) {
       notify(
         `سقف ${fa.format(ROW_LIMIT)} ${info.singular} برای این پروژه پر شده است.`,
       );
       return;
     }
-    setDraft(initialRow(kind, rows));
+    const initial = initialRow(kind, rows); draftBaseline.current = null; draftOriginalRow.current = null; draftInitial.current = { ...initial }; setDraft(initial);
     setCreating(true);
     setError("");
   };
@@ -568,6 +577,7 @@ function RowWorkspace({
         ? [...rows, clean]
         : rows.map((row) => (row.id === draft.id ? clean : row)),
     )) return;
+    formDraft.clear();
     setDraft(null);
     notify(`${info.singular} ${creating ? "اضافه" : "به‌روزرسانی"} شد.`);
   };
@@ -821,6 +831,12 @@ function RowWorkspace({
   };
   return (
     <section className={`workspace page-workspace workspace-${kind}`}>
+      <RowDraftRecovery draft={formDraft.recovery} error={formDraft.error} onDiscard={formDraft.clear} onRecover={() => {
+        const saved = formDraft.recover();
+        if (!saved) return;
+        draftOriginalRow.current = saved.baseline; draftBaseline.current = saved.baseline ? rowFingerprint(saved.baseline) : null; draftInitial.current = saved.initial;
+        setDraft({ ...saved.row }); setCreating(saved.creating); setError("");
+      }}/>
       <div className="workspace-heading">
         <div>
           <span className="eyebrow">{info.eyebrow}</span>
@@ -832,7 +848,7 @@ function RowWorkspace({
         </div>
         <button
           className="btn btn-primary"
-          disabled={readOnly || rows.length >= ROW_LIMIT}
+          disabled={readOnly || !formDraft.ready || !!formDraft.recovery || rows.length >= ROW_LIMIT}
           title={
             rows.length >= ROW_LIMIT
               ? "سقف تعداد رکوردهای این پروژه پر شده است"
@@ -1172,6 +1188,7 @@ function RowWorkspace({
                       <div className="workspace-row-actions">
                         <button
                           className="icon-button"
+                          disabled={!formDraft.ready}
                           onClick={() => edit(row)}
                           aria-label={`ویرایش ${text(row.target || row.topic || resolvePage(row)?.target || row.id)}`}
                           title="ویرایش"
@@ -1228,6 +1245,7 @@ function RowWorkspace({
         <RowDrawer
           key={draft.id}
           draft={draft}
+          initial={draftInitial.current || draft}
           readOnly={readOnly}
           setDraft={setDraft}
           kind={kind}
@@ -1236,7 +1254,7 @@ function RowWorkspace({
           creating={creating}
           error={error}
           onSave={save}
-          onClose={() => setDraft(null)}
+          onClose={() => { formDraft.clear(); setDraft(null); }}
           nextAction={nextAction(draft)}
           resolvePage={resolvePage}
           onNavigate={onNavigate}
@@ -1351,6 +1369,7 @@ function useDialogFocus(
 
 function RowDrawer({
   draft,
+  initial,
   setDraft,
   kind,
   settings,
@@ -1366,6 +1385,7 @@ function RowDrawer({
   notify,
 }: {
   draft: Row;
+  initial: Row;
   setDraft: (row: Row) => void;
   kind: WorkspaceKind;
   settings: WorkspaceProps["settings"];
@@ -1381,7 +1401,7 @@ function RowDrawer({
   notify: (message: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const original = useRef(rowFingerprint(draft));
+  const original = useRef(rowFingerprint(initial));
   const dirty = rowFingerprint(draft) !== original.current;
   const requestClose = () => {
     if (

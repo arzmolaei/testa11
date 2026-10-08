@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { installCloudflare, LOGIN_SCOPES, parseArguments, parseJSONC, parseCommandJSON, cloudEnvironment, validPassword, validateWorkerURL, deploymentURL } from './install-cloudflare.mjs';
+import { installCloudflare, LOGIN_SCOPES, parseArguments, parseJSONC, parseCommandJSON, cloudEnvironment, validPassword, validExistingPassword, validateWorkerURL, deploymentURL } from './install-cloudflare.mjs';
 
 const firstAccount = 'a'.repeat(32), secondAccount = 'b'.repeat(32);
 const dbId = '12345678-1234-4321-9876-123456789abc';
@@ -80,7 +80,7 @@ async function fixture(t, settings = {}) {
       if (url.endsWith('/api/status')) return Response.json({ configured: true });
       if (url.endsWith('/api/login')) {
         if (settings.badPassword) return Response.json({ error: 'INVALID_PASSWORD' }, { status: 401 });
-        assert.equal(JSON.parse(options.body).password, password);
+        assert.equal(JSON.parse(options.body).password, settings.loginPassword ?? password);
         return Response.json({ authenticated: true }, { headers: { 'set-cookie': 'seo_session=test-session; HttpOnly; Secure; Path=/' } });
       }
       if (url.endsWith('/api/state')) {
@@ -153,6 +153,37 @@ test('interruption after secret upload discovers existing secret and does not re
   assert.equal(f.cloud.secrets.length, 1);
   await installCloudflare({}, f.dependencies);
   assert.equal(f.calls.filter(call => hasCommand(call, 'secret', 'put')).length, 1);
+  const state = JSON.parse(await readFile(path.join(f.installDir, 'state.json'), 'utf8'));
+  assert.equal(state.passwordConfigured, true);
+  f.cloud.secrets = [];
+  const before = f.calls.length;
+  await assert.rejects(installCloudflare({}, f.dependencies), /existing session secret is missing/);
+  assert.equal(f.calls.slice(before).some(call => hasCommand(call, 'secret', 'put') || hasCommand(call, 'deploy')), false);
+});
+
+test('updating accepts the exact existing account password including leading and trailing spaces', async t => {
+  const existingPassword = '  Account-password-123!  ';
+  const f = await fixture(t, {
+    cloud: { secrets: [{ name: 'APP_PASSWORD', type: 'secret_text' }] },
+    secretAnswers: [existingPassword], loginPassword: existingPassword,
+  });
+  await installCloudflare({}, f.dependencies);
+  assert.equal(f.calls.some(call => hasCommand(call, 'secret', 'put')), false);
+  assert.equal(JSON.parse(f.requests.find(request => request.url.endsWith('/api/login')).options.body).password, existingPassword);
+  assert.ok(f.messages.every(message => !message.includes(existingPassword)));
+});
+
+test('an older deployed identity cannot recreate a missing session secret even without its old flag', async t => {
+  const f = await fixture(t);
+  await installCloudflare({}, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json');
+  const state = JSON.parse(await readFile(stateFile, 'utf8'));
+  delete state.passwordConfigured;
+  await writeFile(stateFile, JSON.stringify(state));
+  f.cloud.secrets = [];
+  const before = f.calls.length;
+  await assert.rejects(installCloudflare({}, f.dependencies), /existing session secret is missing/);
+  assert.equal(f.calls.slice(before).some(call => hasCommand(call, 'secret', 'put') || hasCommand(call, 'deploy')), false);
 });
 
 test('multiple account choice rejects invalid choice and binds every remote command to chosen account', async t => {
@@ -254,6 +285,9 @@ test('helpers preserve URLs in JSONC, parse warning-prefixed JSON, and validate 
   assert.equal(validPassword(` ${password}`), false);
   assert.equal(validPassword(`${password} `), false);
   assert.equal(validPassword('short'), false);
+  assert.equal(validExistingPassword(` ${password} `), true);
+  assert.equal(validExistingPassword(''), false);
+  assert.equal(validExistingPassword('x'.repeat(1025)), false);
   assert.equal(cloudEnvironment({ CLOUDFLARE_API_TOKEN: 'secret', CF_ACCOUNT_ID: 'account', PATH: 'good' }).PATH, 'good');
   const worker = 'rooyesh-1234567890abcdef12345678';
   assert.equal(validateWorkerURL(`https://${worker}.personal.workers.dev`, worker), `https://${worker}.personal.workers.dev`);

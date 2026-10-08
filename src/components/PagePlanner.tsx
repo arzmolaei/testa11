@@ -12,12 +12,15 @@ type Props = {
   onProjectChange: (project: Project) => boolean | void;
   notify: (message: string) => void;
   readOnly?: boolean;
+  draftScope?: string;
+  canRecoverLegacyDraft?: boolean;
   onNavigate?: (view: "pages" | "content", rowId?: string) => void;
 };
 type Selection = { candidateId: string; label?: string; primaryKeyword?: string; pageType?: string; targetPageId?: string; excluded?: boolean };
 type Modal = { kind: "keywords"; id: string } | { kind: "target"; id: string } | { kind: "merge" } | { kind: "confirm" } | null;
 type SavedPlan = { version: 1; projectId: string; source: string; candidates: PageCandidate[]; choices: Record<string, Selection>; selected: string[]; createBriefs: boolean };
 const pendingDrafts = new Map<string, Promise<unknown>>();
+const draftKey = (projectId: string, scope: string) => JSON.stringify([scope, projectId]);
 function openDrafts(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("seo-page-plans-v1", 1);
@@ -27,28 +30,46 @@ function openDrafts(): Promise<IDBDatabase> {
     request.onblocked = () => reject(new Error("حافظهٔ پیش‌نویس در دسترس نیست."));
   });
 }
-async function readDraft(projectId: string): Promise<SavedPlan | null> {
-  await pendingDrafts.get(projectId)?.catch(() => {});
+async function readDraft(key: string, projectId: string, recoverLegacy = false): Promise<SavedPlan | null> {
+  const legacyProjectId = recoverLegacy ? projectId : undefined;
+  await pendingDrafts.get(key)?.catch(() => {});
   const db = await openDrafts();
   try { return await new Promise((resolve, reject) => {
-    const request = db.transaction("drafts").objectStore("drafts").get(projectId);
-    request.onsuccess = () => resolve(request.result ?? null);
+    const tx = db.transaction("drafts", legacyProjectId ? "readwrite" : "readonly");
+    const store = tx.objectStore("drafts");
+    let saved: SavedPlan | null = null;
+    const request = store.get(key);
+    request.onsuccess = () => {
+      saved = request.result ?? null;
+      if (saved && !validDraft(saved, projectId)) { reject(new Error("پیش‌نویس قبلی معتبر نیست و در دستگاه حفظ شده است.")); return; }
+      if (saved || !legacyProjectId) return;
+      const legacy = store.get(legacyProjectId);
+      legacy.onsuccess = () => {
+        if (!validDraft(legacy.result, legacyProjectId)) return;
+        saved = legacy.result;
+        store.put(saved, key); store.delete(legacyProjectId);
+      };
+    };
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve(saved);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   }); } finally { db.close(); }
 }
-function writeDraft(projectId: string, draft: SavedPlan | null): Promise<void> {
-  const operation = (pendingDrafts.get(projectId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+function writeDraft(key: string, draft: SavedPlan | null): Promise<void> {
+  const snapshot = draft === null ? null : structuredClone(draft);
+  const operation = (pendingDrafts.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
     const db = await openDrafts();
     try { await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction("drafts", "readwrite"), store = transaction.objectStore("drafts");
-      if (draft) store.put(draft, projectId); else store.delete(projectId);
+      if (snapshot) store.put(snapshot, key); else store.delete(key);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);
     }); } finally { db.close(); }
   });
-  pendingDrafts.set(projectId, operation);
-  operation.finally(() => { if (pendingDrafts.get(projectId) === operation) pendingDrafts.delete(projectId); }).catch(() => {});
+  pendingDrafts.set(key, operation);
+  operation.finally(() => { if (pendingDrafts.get(key) === operation) pendingDrafts.delete(key); }).catch(() => {});
   return operation;
 }
 function validDraft(value: unknown, projectId: string): value is SavedPlan {
@@ -91,7 +112,7 @@ function exportPlan(candidates: PageCandidate[], selections: Record<string, Sele
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function PagePlanner({ project, onProjectChange, notify, readOnly = false, onNavigate }: Props) {
+export function PagePlanner({ project, onProjectChange, notify, readOnly = false, draftScope = "local-development", canRecoverLegacyDraft = false, onNavigate }: Props) {
   const serialized = useMemo(() => JSON.stringify(project), [project]);
   const [source, setSource] = useState(serialized);
   const [candidates, setCandidates] = useState(() => analyzePageCandidates(project));
@@ -116,7 +137,9 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
   const [undo, setUndo] = useState<{ candidates: PageCandidate[]; choices: Record<string, Selection>; selected: Set<string> } | null>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const latestDraft = useRef<{ projectId: string; ready: boolean; readOnly: boolean; draft: SavedPlan | null }>({ projectId: project.id, ready: false, readOnly, draft: null });
+  const storageKey = draftKey(project.id, draftScope);
+  const draftIdentity = useRef(storageKey);
+  const latestDraft = useRef<{ key: string; ready: boolean; readOnly: boolean; draft: SavedPlan | null }>({ key: storageKey, ready: false, readOnly, draft: null });
   const stale = source !== serialized;
   const keywords = useMemo(() => new Map(project.keywords.map((row) => [row.id, row])), [project.keywords]);
   const keywordSearch = useMemo(() => new Map(project.keywords.map((row) => [row.id, normalize(row.keyword)])), [project.keywords]);
@@ -158,7 +181,7 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
   }, [selectedCandidates, keywords]);
   const readyCount = preview ? preview.createdPages + preview.updatedPages + preview.linkedKeywords + preview.createdContent : 0;
   const newBriefCapacity = Math.max(0, 2000 - project.content.length);
-  latestDraft.current = { projectId: project.id, ready: draftReady, readOnly, draft: dirty ? { version: 1, projectId: project.id, source, candidates, choices, selected: [...selected], createBriefs } : null };
+  if (draftIdentity.current === storageKey) latestDraft.current = { key: storageKey, ready: draftReady && !draftError, readOnly, draft: dirty ? { version: 1, projectId: project.id, source, candidates, choices, selected: [...selected], createBriefs } : null };
 
   useEffect(() => {
     const media = window.matchMedia(MOBILE_QUERY);
@@ -169,27 +192,32 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
 
   useEffect(() => {
     let canceled = false;
+    if (draftIdentity.current !== storageKey) {
+      draftIdentity.current = storageKey;
+      latestDraft.current = { key: storageKey, ready: false, readOnly, draft: null };
+      setCandidates(analyzePageCandidates(project)); setSource(serialized); setChoices({}); setSelected(new Set()); setCreateBriefs(true); setDirty(false); setUndo(null); setModal(null); setQuery(""); setFilter("all"); setPage(0); setDraftError(false); setApplyRejected(false);
+    }
     setDraftReady(false);
     setRecovered(false);
     if (readOnly) {
-      if (latestDraft.current.draft) writeDraft(project.id, latestDraft.current.draft).catch(() => setDraftError(true));
+      if (latestDraft.current.draft) writeDraft(storageKey, latestDraft.current.draft).catch(() => setDraftError(true));
       setDraftReady(true); return;
     }
-    readDraft(project.id).then((saved) => {
+    readDraft(storageKey, project.id, canRecoverLegacyDraft).then((saved) => {
       if (canceled || !validDraft(saved, project.id)) return;
       setSource(saved.source); setCandidates(saved.candidates); setChoices(saved.choices); setSelected(new Set(saved.selected)); setCreateBriefs(saved.createBriefs); setDirty(true); setRecovered(true);
     }).catch(() => { if (!canceled) setDraftError(true); }).finally(() => { if (!canceled) setDraftReady(true); });
     return () => { canceled = true; };
-  }, [project.id, readOnly]);
+  }, [project.id, storageKey, readOnly, canRecoverLegacyDraft]);
   useEffect(() => {
-    if (!draftReady || readOnly) return;
-    const timer = window.setTimeout(() => { writeDraft(project.id, latestDraft.current.draft).catch(() => setDraftError(true)); }, 300);
+    if (!draftReady || readOnly || draftError) return;
+    const timer = window.setTimeout(() => { writeDraft(storageKey, latestDraft.current.draft).catch(() => setDraftError(true)); }, 300);
     return () => window.clearTimeout(timer);
-  }, [project.id, draftReady, readOnly, dirty, candidates, choices, selected, source, createBriefs]);
+  }, [storageKey, draftReady, readOnly, draftError, dirty, candidates, choices, selected, source, createBriefs]);
   useEffect(() => () => {
     const latest = latestDraft.current;
-    if (latest.projectId === project.id && latest.ready && !latest.readOnly) writeDraft(project.id, latest.draft).catch(() => {});
-  }, [project.id]);
+    if (latest.key === storageKey && latest.ready && !latest.readOnly && !draftError) writeDraft(storageKey, latest.draft).catch(() => {});
+  }, [storageKey]);
 
   function regenerate() {
     if (dirty && !window.confirm("پیش‌نویس فعلی کنار گذاشته شود و پیشنهادها از اطلاعات جدید ساخته شوند؟")) return;
@@ -239,6 +267,11 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
     setSelected((old) => new Set([...old, ...filtered.filter((candidate) => !strongOnly || candidate.confidence === "strong").map((candidate) => candidate.id)])); setDirty(true);
   }
   function rememberUndo() { setUndo({ candidates, choices, selected: new Set(selected) }); }
+  function subsetCandidate(candidate: PageCandidate, keywordIds: string[]): PageCandidate {
+    const ids = new Set(keywordIds);
+    const subset = analyzePageCandidates({ ...project, keywords: project.keywords.filter((row) => ids.has(row.id)) });
+    return { ...candidate, keywordIds, existingPageIds: [...new Set(subset.flatMap((item) => item.existingPageIds))], sourceFingerprints: candidate.sourceFingerprints ? Object.fromEntries(Object.entries(candidate.sourceFingerprints).filter(([id]) => ids.has(id))) : undefined };
+  }
   function openKeywords(candidate: PageCandidate) {
     setKeywordQuery(""); setKeywordPage(0); setKeywordSelection(new Set()); setNewLabel(`${choices[candidate.id]?.label ?? candidate.label} — گروه جدا`); setModal({ kind: "keywords", id: candidate.id });
   }
@@ -250,11 +283,12 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
     rememberUndo();
     const remaining = activeCandidate.keywordIds.filter((id) => !keywordSelection.has(id));
     const newCandidate: PageCandidate = {
-      ...activeCandidate, id: `split-${uid()}`, label: newLabel.trim(), keywordIds: removed,
+      ...subsetCandidate(activeCandidate, removed), id: `split-${uid()}`, label: newLabel.trim(),
       primaryKeyword: removed.map((id) => keywords.get(id)).sort((a, b) => Number(b?.volume ?? 0) - Number(a?.volume ?? 0)).map((row) => text(row?.keyword))[0] ?? "",
       confidence: "review", reasons: ["این پیشنهاد با انتخاب شما از گروه قبلی جدا شده است.", ...activeCandidate.reasons],
     };
-    setCandidates((old) => old.flatMap((candidate) => candidate.id !== activeCandidate.id ? [candidate] : [...(remaining.length ? [{ ...candidate, keywordIds: remaining, primaryKeyword: remaining.some((id) => text(keywords.get(id)?.keyword) === candidate.primaryKeyword) ? candidate.primaryKeyword : text(keywords.get(remaining[0])?.keyword) }] : []), ...(keepAsProposal ? [newCandidate] : [])]));
+    const remainingCandidate = remaining.length ? { ...subsetCandidate(activeCandidate, remaining), primaryKeyword: remaining.some((id) => text(keywords.get(id)?.keyword) === activeCandidate.primaryKeyword) ? activeCandidate.primaryKeyword : text(keywords.get(remaining[0])?.keyword) } : null;
+    setCandidates((old) => old.flatMap((candidate) => candidate.id !== activeCandidate.id ? [candidate] : [...(remainingCandidate ? [remainingCandidate] : []), ...(keepAsProposal ? [newCandidate] : [])]));
     setSelected((old) => { const next = new Set(old); if (!remaining.length) next.delete(activeCandidate.id); return next; });
     setChoices((old) => { const next = { ...old }; if (next[activeCandidate.id]?.primaryKeyword && !remaining.some((id) => text(keywords.get(id)?.keyword) === next[activeCandidate.id].primaryKeyword)) next[activeCandidate.id] = { ...next[activeCandidate.id], primaryKeyword: text(keywords.get(remaining[0])?.keyword) }; return next; });
     setDirty(true); setModal(null);
@@ -275,7 +309,8 @@ export function PagePlanner({ project, onProjectChange, notify, readOnly = false
     if (invalidChoices) { notify("موضوع و کلمهٔ اصلی پیشنهادهای انتخابی باید مشخص باشند."); return; }
     const result = buildPagePlan(project, candidates, selections, { createBriefs });
     if (!(result.createdPages + result.updatedPages + result.linkedKeywords + result.createdContent)) { notify("تغییری قابل اعمال نیست؛ صفحهٔ هدف و موارد نیازمند بررسی را کنترل کنید."); return; }
-    if (onProjectChange(result.project) === false) { setApplyRejected(true); return; }
+    try { if (onProjectChange(result.project) === false) { setApplyRejected(true); return; } }
+    catch { setApplyRejected(true); notify("ثبت برنامه انجام نشد؛ پیش‌نویس و انتخاب‌های شما حفظ شده‌اند."); return; }
     setApplyRejected(false);
     setDirty(false); setRecovered(false); setUndo(null); setSelected(new Set()); setChoices({}); setModal(null);
     notify(`${number(result.createdPages)} صفحه و ${number(result.createdContent)} بریف ساخته شد؛ ${number(result.linkedKeywords)} کلمه به صفحه متصل شد.${result.skipped ? ` ${number(result.skipped)} مورد برای حفظ اطلاعات موجود کنار گذاشته شد.` : ""}`);

@@ -48,6 +48,8 @@ export type WorkspaceProps = {
   onRowsChange: (collection: Collection, rows: Row[]) => boolean | void;
   notify: (message: string) => void;
   readOnly?: boolean;
+  draftScope?: string;
+  canRecoverLegacyDraft?: boolean;
   focusRowId?: string;
   onFocusHandled?: () => void;
   onNavigate?: (view: Collection | "bulk", rowId?: string) => void;

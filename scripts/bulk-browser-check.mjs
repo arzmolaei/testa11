@@ -26,7 +26,7 @@ async function save() { await page.getByRole("button", { name: "ذخیره تغ�
 async function draft() {
   return page.evaluate(() => new Promise((resolve, reject) => {
     const request = indexedDB.open("seo-bulk-drafts-v1", 1);
-    request.onsuccess = () => { const db = request.result; const read = db.transaction("drafts").objectStore("drafts").get("bulk-project:keywords"); read.onsuccess = () => { resolve(read.result); db.close(); }; read.onerror = () => reject(read.error); };
+    request.onsuccess = () => { const db = request.result; const read = db.transaction("drafts").objectStore("drafts").get(JSON.stringify(["bulk-test", "bulk-project", "keywords"])); read.onsuccess = () => { resolve(read.result); db.close(); }; read.onerror = () => reject(read.error); };
   }));
 }
 let failure;

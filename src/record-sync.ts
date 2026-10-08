@@ -130,7 +130,16 @@ export async function applyChangeSet(current: Store, input: ChangeSet): Promise<
   // Copy only touched containers. Large unchanged Search Console datasets stay
   // shared during this merge; writes always replace, rather than mutate, values.
   const next: Store = { ...current, projects: current.projects.slice(), settings: { ...current.settings } };
-  const copiedProjects = new Set<string>(), copiedCollections = new Set<string>();
+  const copiedProjects = new Set<string>();
+  type EditableRows = {
+    list: Record<string, unknown>[];
+    byId: Map<string, Record<string, unknown>>;
+    positions: Map<string, number>;
+    removed: Set<string>;
+    project: Record<string, unknown>;
+    collection: SyncCollection;
+  };
+  const collections = new Map<string, EditableRows>();
   function editableProject(projectId: string): Record<string, unknown> | undefined {
     const index = next.projects.findIndex((project) => project.id === projectId);
     if (index < 0) return undefined;
@@ -145,6 +154,7 @@ export async function applyChangeSet(current: Store, input: ChangeSet): Promise<
     const address: Address = { collection: change.collection, projectId: change.projectId, rowId: change.rowId };
     let target: Record<string, unknown> | undefined;
     let list: Record<string, unknown>[] | undefined;
+    let indexed: EditableRows | undefined;
     if (change.collection === "settings") target = next.settings as unknown as Record<string, unknown>;
     else if (change.collection === "projects") {
       list = next.projects as unknown as Record<string, unknown>[];
@@ -153,27 +163,44 @@ export async function applyChangeSet(current: Store, input: ChangeSet): Promise<
     } else {
       const project = editableProject(change.projectId);
       if (!project) { conflicts.push({ ...address, fields: ["project"] }); continue; }
-      if (!Array.isArray(project[change.collection]) && change.kind === "create") project[change.collection] = [];
       const collectionKey = JSON.stringify([change.projectId, change.collection]);
-      if (!copiedCollections.has(collectionKey)) {
-        if (Array.isArray(project[change.collection])) project[change.collection] = (project[change.collection] as unknown[]).slice();
-        copiedCollections.add(collectionKey);
+      indexed = collections.get(collectionKey);
+      if (!indexed) {
+        list = Array.isArray(project[change.collection]) ? (project[change.collection] as Record<string, unknown>[]).slice() : [];
+        indexed = {
+          list, byId: new Map(list.map((row) => [String(row.id), row])),
+          positions: new Map(list.map((row, index) => [String(row.id), index])),
+          removed: new Set(), project, collection: change.collection,
+        };
+        collections.set(collectionKey, indexed);
+        if (Array.isArray(project[change.collection])) project[change.collection] = list;
       }
-      list = Array.isArray(project[change.collection]) ? project[change.collection] as Record<string, unknown>[] : [];
-      target = list.find((row) => row.id === change.rowId);
+      list = indexed.list;
+      if (change.kind === "create" && !Array.isArray(project[change.collection])) project[change.collection] = list;
+      target = indexed.byId.get(change.rowId);
       if (target && change.kind === "edit") {
-        const index = list.indexOf(target);
         target = { ...target };
-        list[index] = target;
+        list[indexed.positions.get(change.rowId)!] = target;
+        indexed.byId.set(change.rowId, target);
       }
     }
     if (change.kind === "create") {
       if (target) { if (!equal(target, change.after)) conflicts.push({ ...address, fields: ["id"] }); }
-      else { list!.push(structuredClone(change.after)); applied.push(change); }
+      else {
+        const created = structuredClone(change.after);
+        if (indexed) {
+          indexed.positions.set(change.rowId, list!.length);
+          indexed.byId.set(change.rowId, created);
+        }
+        list!.push(created); applied.push(change);
+      }
     } else if (change.kind === "delete") {
       if (!target) continue; // A retried delete is harmless.
       if (await recordFingerprint(target) !== change.beforeHash) { conflicts.push({ ...address, fields: ["record"] }); continue; }
-      list!.splice(list!.indexOf(target), 1);
+      if (indexed) {
+        indexed.removed.add(change.rowId);
+        indexed.byId.delete(change.rowId);
+      } else list!.splice(list!.indexOf(target), 1);
       applied.push(change);
     } else {
       if (!target) { conflicts.push({ ...address, fields: ["record"] }); continue; }
@@ -210,6 +237,11 @@ export async function applyChangeSet(current: Store, input: ChangeSet): Promise<
     }
   }
   if (conflicts.length) return { state: current, conflicts, applied: [] };
+  // Retain row order, but compact deletions once per touched collection. A
+  // large bulk edit must not search or shift the whole array for every row.
+  for (const indexed of collections.values()) {
+    if (indexed.removed.size) indexed.project[indexed.collection] = indexed.list.filter((row) => !indexed.removed.has(String(row.id)));
+  }
   if (!next.projects.some((project) => project.id === next.activeProjectId)) next.activeProjectId = next.projects[0]?.id || "";
   return { state: next, conflicts: [], applied };
 }

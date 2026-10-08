@@ -1,6 +1,21 @@
 import type { Store } from "./types";
 const DB_NAME = "rooyesh-seo-v1";
 export type Stored = { state: Store; revision: number; savedAt: string };
+function removedData(previous: Store, next: Store): boolean {
+  const projects = new Map(next.projects.map((project) => [project.id, project]));
+  for (const before of previous.projects) {
+    const after = projects.get(before.id);
+    if (!after) return true;
+    for (const key of ["keywords", "pages", "content", "results", "tasks", "links"] as const) {
+      const ids = new Set((after[key] || []).map((row) => row.id));
+      if ((before[key] || []).some((row) => !ids.has(row.id))) return true;
+    }
+    for (const period of ["current", "previous"] as const) {
+      if (before.searchConsole?.[period] && before.searchConsole[period]!.id !== after.searchConsole?.[period]?.id) return true;
+    }
+  }
+  return false;
+}
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
@@ -35,6 +50,7 @@ export async function saveLocal(
   expected: number,
   forceBackup = false,
 ): Promise<Stored> {
+  if (!Number.isSafeInteger(expected) || expected < 0 || expected >= Number.MAX_SAFE_INTEGER) throw new Error("شمارهٔ نسخهٔ محلی معتبر نیست؛ ابتدا پشتیبان بگیرید و حافظه را بازیابی کنید.");
   const db = await database();
   try {
     return await new Promise((resolve, reject) => {
@@ -57,27 +73,19 @@ export async function saveLocal(
         record = {
           state,
           revision: expected + 1,
-          savedAt: new Date().toISOString(),
+          // Multiple commits can share a millisecond (or the clock can move
+          // backwards). Backup keys must still identify distinct revisions.
+          savedAt: new Date(Math.max(Date.now(), (Number.isFinite(Date.parse(current?.savedAt || "")) ? Date.parse(current!.savedAt) + 1 : 0))).toISOString(),
         };
         os.put(record, "state");
         if (current) {
           const stamp = os.get("lastBackupAt");
           stamp.onsuccess = () => {
-            const count = (s: Store) =>
-              s.projects.reduce(
-                (n, p) =>
-                  n +
-                  p.keywords.length +
-                  p.pages.length +
-                  p.content.length +
-                  p.results.length,
-                0,
-              );
             if (
               forceBackup ||
               !stamp.result ||
               Date.now() - Number(stamp.result) > 60000 ||
-              count(state) < count(current.state)
+              removedData(current.state, state)
             ) {
               backups.put(current);
               os.put(Date.now(), "lastBackupAt");

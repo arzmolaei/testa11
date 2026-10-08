@@ -1,7 +1,8 @@
-import { isIsoDate, latinDigits } from "./dates";
+import { formatJalaliInput, isIsoDate, latinDigits } from "./dates";
 import type { Project, Row } from "./types";
 
 export const SEARCH_CONSOLE_ROW_LIMIT = 20_000;
+export const SEARCH_CONSOLE_COLUMN_LIMIT = 64;
 export const SEARCH_CONSOLE_BYTES_LIMIT = 5_000_000;
 export type SearchConsoleRow = {
   id: string; query?: string; page?: string; clicks: number; impressions: number;
@@ -35,11 +36,13 @@ export type SearchConsoleInsight = {
     clicks: number; impressions: number; ctr: number; position?: number;
     previousClicks?: number; clickChange?: number; periodStart: string; periodEnd: string; urls?: string[];
     device?: string; country?: string;
+    sourceFilters?: string;
   };
 };
 
 export function searchConsoleInsightSource(insight: SearchConsoleInsight): string {
-  return `gsc:${insight.evidence.periodStart}:${insight.evidence.periodEnd}:${insight.id}`;
+  const filters = normalizeText(insight.evidence.sourceFilters);
+  return `gsc:${insight.evidence.periodStart}:${insight.evidence.periodEnd}:${insight.id}${filters ? `:filters-${stableId(filters)}` : ""}`;
 }
 
 const normalizeText = (value: unknown) => String(value ?? "").trim().replace(/ي/g, "ی").replace(/ك/g, "ک");
@@ -100,7 +103,23 @@ export function parseSearchConsoleNumber(raw: string, integer = false): number |
   value = value.replace(/٫/g, ".");
   if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
   const number = Number(value);
-  return Number.isFinite(number) && number <= 1_000_000_000_000 && (!integer || Number.isInteger(number)) ? number : null;
+  return Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER && (!integer || Number.isSafeInteger(number)) ? number : null;
+}
+
+/** Keep only the file's actual dimensions so its own CSV can be imported again. */
+export function searchConsoleDatasetCsv(dataset: SearchConsoleDataset): string {
+  const fields = SEARCH_CONSOLE_FIELDS.filter(({ key }) => key !== "query" || dataset.dimension !== "page").filter(({ key }) => key !== "page" || dataset.dimension !== "query");
+  const escape = (value: unknown) => {
+    let raw = String(value ?? "");
+    if (/^[\s\u0000-\u001f]*[=+\-@]/.test(raw)) raw = `'${raw}`;
+    return `"${raw.replaceAll('"', '""')}"`;
+  };
+  const matrix: unknown[][] = [[...fields.map(({ label }) => label.replace(/\s*\(اختیاری\)/, "")), "شروع دوره", "پایان دوره"]];
+  for (const row of dataset.rows) matrix.push([
+    ...fields.map(({ key }) => key === "ctr" ? `${row.impressions ? (row.clicks / row.impressions * 100).toFixed(20).replace(/\.?0+$/, "") : "0"}%` : row[key]),
+    formatJalaliInput(dataset.periodStart), formatJalaliInput(dataset.periodEnd),
+  ]);
+  return "\uFEFF" + matrix.map((row) => row.map(escape).join(",")).join("\r\n");
 }
 
 function addSearchConsoleCount(total: number, value: number): number {
@@ -130,6 +149,7 @@ export function aggregateSearchConsoleRows(rows: SearchConsoleRow[]): SearchCons
 export function prepareSearchConsoleImport(matrix: string[][], mapping: SearchConsoleMapping): SearchConsolePreview {
   const result: SearchConsolePreview = { rows: [], errors: [], errorCount: 0, sourceRows: 0, skipped: 0 };
   const error = (row: number, message: string) => { result.errorCount++; if (result.errors.length < 12) result.errors.push({ row, message }); };
+  if ((matrix[0]?.length || 0) > SEARCH_CONSOLE_COLUMN_LIMIT) { error(1, "فایل حداکثر ۶۴ ستون داشته باشد؛ فقط ستون‌های گزارش عملکرد را نگه دارید."); return result; }
   const has = (key: SearchConsoleField) => mapping[key] !== undefined && mapping[key] !== "";
   if (!has("query") && !has("page")) error(1, "ستون عبارت جست‌وجو یا نشانی صفحه را مشخص کنید.");
   if (!has("clicks") || !has("impressions")) error(1, "ستون کلیک و نمایش ضروری است.");
@@ -181,7 +201,7 @@ export function searchConsoleComparisonReason(current?: SearchConsoleDataset, pr
   if (current.dimension !== previous.dimension) return "نوع دادهٔ دو دوره یکسان نیست؛ دادهٔ عبارت و صفحه را نمی‌توان به هم پیوند داد.";
   if (searchConsolePeriodDays(current) !== searchConsolePeriodDays(previous)) return "طول دو دوره برابر نیست؛ دوره‌های هم‌اندازه وارد کنید.";
   if (previous.periodEnd >= current.periodStart) return "دورهٔ قبلی باید پیش از دورهٔ فعلی و بدون همپوشانی باشد.";
-  if (normalizeText(current.sourceFilters).toLowerCase() !== normalizeText(previous.sourceFilters).toLowerCase()) return "فیلترهای خروجی دو دوره یکسان نیستند.";
+  if (normalizeText(current.sourceFilters) !== normalizeText(previous.sourceFilters)) return "فیلترهای خروجی دو دوره یکسان نیستند.";
   const dimensions = (data: SearchConsoleDataset) => data.rows.some((row) => Boolean(row.device)) + ":" + data.rows.some((row) => Boolean(row.country));
   if (dimensions(current) !== dimensions(previous)) return "ستون‌های دستگاه یا کشور دو دوره یکسان نیستند.";
   return null;
@@ -231,7 +251,7 @@ export function buildSearchConsoleInsights(project: SearchConsoleProject): Searc
   const add = (row: SearchConsoleRow, kind: SearchConsoleInsight["kind"], title: string, reason: string, priority: SearchConsoleInsight["priority"], extra: Partial<SearchConsoleInsight["evidence"]> = {}) => {
     insights.push({ id: `${kind}-${stableId(searchConsoleRowKey(row))}`, kind, title, reason, priority,
       pageId: row.page ? pageLookup.get(normalizeSearchConsoleUrl(row.page)) || undefined : undefined, query: row.query, url: row.page,
-      evidence: { clicks: row.clicks, impressions: row.impressions, ctr: row.impressions ? row.clicks / row.impressions : 0, position: row.position, periodStart: current.periodStart, periodEnd: current.periodEnd, device: row.device, country: row.country, ...extra } });
+      evidence: { clicks: row.clicks, impressions: row.impressions, ctr: row.impressions ? row.clicks / row.impressions : 0, position: row.position, periodStart: current.periodStart, periodEnd: current.periodEnd, device: row.device, country: row.country, sourceFilters: current.sourceFilters, ...extra } });
   };
   for (const row of current.rows) {
     const ctr = row.impressions ? row.clicks / row.impressions : 0;

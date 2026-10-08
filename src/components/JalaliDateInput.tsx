@@ -38,13 +38,15 @@ export function JalaliDateInput({
   const invalid = Boolean(text.trim()) && !parseJalali(text);
 
   useEffect(() => {
-    if (emitted.current === value) return;
+    if (emitted.current === value) { emitted.current = null; return; }
+    emitted.current = null;
     setText(displayValue);
     setTouched(false);
   }, [value]);
   useEffect(() => {
     input.current?.setCustomValidity(invalid ? "تاریخ شمسی معتبر وارد کنید؛ مانند ۱۴۰۵/۰۷/۱۵." : "");
   }, [invalid]);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   useEffect(() => {
     if (!open) return;
     const place = () => {
@@ -132,6 +134,7 @@ export function JalaliDateInput({
       onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePicker(); }
         if (event.key === "Tab") {
+          event.stopPropagation();
           const controls = [...(picker.current?.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"]), select:not(:disabled)') || [])];
           const first = controls[0], last = controls[controls.length - 1];
           if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }

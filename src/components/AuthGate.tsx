@@ -58,6 +58,12 @@ export function AuthGate({ children }: {
   const checking = useRef(false);
   const passwordInput = useRef<HTMLInputElement>(null);
 
+  const clearOfflineChoice = useCallback(() => {
+    offlineRef.current = false;
+    setOffline(false);
+    forgetRememberedSession();
+  }, []);
+
   const acceptSession = useCallback((next: AuthSession) => {
     sessionRef.current = next;
     setSession(next);
@@ -98,14 +104,14 @@ export function AuthGate({ children }: {
       }
       markLocalDevelopment(false);
       if (!status.configured) {
-        forgetRememberedSession();
+        clearOfflineChoice();
         sessionRef.current = null;
         setSession(null);
         setState("setup");
       } else if (status.authenticated && validAuthUser(status.user)) {
         acceptSession({ user: status.user, expiresAt: status.expiresAt, mode: "online" });
       } else {
-        forgetRememberedSession();
+        clearOfflineChoice();
         lock(sessionRef.current ? "اعتبار ورود شما تمام شده است. دوباره وارد شوید." : "");
       }
     } catch (cause) {
@@ -132,7 +138,7 @@ export function AuthGate({ children }: {
         }
       }
     } finally { checking.current = false; }
-  }, [acceptSession, lock]);
+  }, [acceptSession, clearOfflineChoice, lock]);
 
   const setOfflineEnabled = useCallback((enabled: boolean) => {
     if (enabled && sessionRef.current?.mode === "online" && !rememberSession(sessionRef.current)) {
@@ -172,7 +178,7 @@ export function AuthGate({ children }: {
     alive.current = true;
     void refresh();
     const expired = () => {
-      forgetRememberedSession();
+      clearOfflineChoice();
       lock("اعتبار ورود شما تمام شده است. دوباره وارد شوید.");
     };
     const online = () => { void refresh(); };
@@ -183,11 +189,17 @@ export function AuthGate({ children }: {
       else lock("برای ورود به اینترنت وصل شوید. دسترسی آفلاین این دستگاه فعال نیست.");
     };
     const storage = (event: StorageEvent) => {
-      if ((event.key === PENDING_LOGOUT_KEY && event.newValue === "1")
-        || (event.key === REMEMBERED_SESSION_KEY && event.newValue === null && sessionRef.current?.mode === "offline")) {
+      if (event.key === PENDING_LOGOUT_KEY && event.newValue === "1") {
         offlineRef.current = false;
         setOffline(false);
         lock("از حساب در پنجره دیگری خارج شدید.");
+      } else if (event.key === null || (event.key === REMEMBERED_SESSION_KEY && event.newValue === null)) {
+        // The device preference is shared by tabs. An online tab must also
+        // discard its in-memory choice, or its next refresh would recreate
+        // a grant that the user explicitly disabled in another tab.
+        offlineRef.current = false;
+        setOffline(false);
+        if (sessionRef.current?.mode === "offline") lock("دسترسی آفلاین این دستگاه در پنجره دیگری بسته شد.");
       }
     };
     window.addEventListener(AUTH_EXPIRED_EVENT, expired);
@@ -208,13 +220,13 @@ export function AuthGate({ children }: {
       window.removeEventListener("offline", offline);
       window.removeEventListener("storage", storage);
     };
-  }, [acceptSession, lock, refresh]);
+  }, [acceptSession, clearOfflineChoice, lock, refresh]);
 
   useEffect(() => {
     if (!session?.expiresAt) return;
     const remaining = Date.parse(session.expiresAt) - Date.now();
     const expire = () => {
-      forgetRememberedSession();
+      clearOfflineChoice();
       lock("اعتبار ورود شما تمام شده است. دوباره وارد شوید.");
     };
     const timer = setTimeout(expire, Math.max(0, remaining));
@@ -223,7 +235,7 @@ export function AuthGate({ children }: {
     };
     document.addEventListener("visibilitychange", visible);
     return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
-  }, [session, lock]);
+  }, [session, clearOfflineChoice, lock]);
 
   async function login(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

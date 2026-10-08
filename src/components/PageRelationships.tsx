@@ -24,7 +24,14 @@ export function PageRelationships({ project, onProjectChange, readOnly = false, 
   const suggestions = analysis.suggestions.filter((item) => matching([item.fromPageId, item.toPageId], item.anchor));
   const registered = links.filter((item) => matching([item.fromPageId, item.toPageId], text(item.anchor)));
   const overlaps = analysis.overlaps.filter((item) => matching(item.pageIds, item.phrases.join(" ")));
+  const dirty = analysis.suggestions.some((item) => anchors[item.id] !== undefined && anchors[item.id] !== item.anchor);
   useEffect(() => { setAnchors({}); setQuery(""); setVisible(30); }, [project.id]);
+  useEffect(() => {
+    if (!dirty) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [dirty]);
   const validAnchor = (value: string) => value.trim().length > 0 && value.trim().length <= 200;
   function commit(next: Project) {
     if (readOnly) return false;
@@ -37,7 +44,7 @@ export function PageRelationships({ project, onProjectChange, readOnly = false, 
     if (!validAnchor(anchor)) { notify("متن لینک را بین ۱ تا ۲۰۰ نویسه وارد کنید."); return; }
     if (links.some((link) => link.fromPageId === suggestion.fromPageId && link.toPageId === suggestion.toPageId)) { notify("این ارتباط قبلاً ثبت شده است."); return; }
     if (!pages.has(suggestion.fromPageId) || !pages.has(suggestion.toPageId)) { notify("یکی از صفحات این پیشنهاد حذف شده است."); return; }
-    const link: Row = { id: uid(), fromPageId: suggestion.fromPageId, toPageId: suggestion.toPageId, anchor, status: "planned", notes: suggestion.reason };
+    const link: Row = { id: uid(), fromPageId: suggestion.fromPageId, toPageId: suggestion.toPageId, anchor, status: "planned", notes: suggestion.reason, createdAt: todayIso() };
     const tasks = project.tasks || [];
     if (!commit({ ...project, links: [...links, link], tasks: tasks.some((task) => task.source === suggestion.id) ? tasks : [...tasks, { id: uid(), title: `بررسی و افزودن لینک از «${pageName(suggestion.fromPageId)}» به «${pageName(suggestion.toPageId)}»`, status: "open", priority: "P2", pageId: suggestion.fromPageId, source: suggestion.id, createdAt: todayIso(), notes: `متن پیشنهادی: ${anchor}\n${suggestion.reason}\nپس از افزودن واقعی لینک در سایت، وضعیت ارتباط را انجام‌شده ثبت کنید.` }] })) return;
     notify("برنامهٔ لینک و کار مرتبط ثبت شد؛ هنوز تغییری در سایت انجام نشده است.");
@@ -46,7 +53,7 @@ export function PageRelationships({ project, onProjectChange, readOnly = false, 
     if (readOnly) return;
     const link = links.find((item) => item.id === id);
     if (!link) return;
-    const next = links.map((item) => item.id === id ? { ...item, ...patch } : item);
+    const next = links.map((item) => item.id === id ? { ...item, ...patch, ...(patch.status ? { implementedAt: patch.status === "implemented" ? todayIso() : "" } : {}) } : item);
     const tasks = (project.tasks || []).map((task) => task.source === `link:${link.fromPageId}:${link.toPageId}` ? { ...task, status: patch.status === "implemented" ? "done" : "open", completedAt: patch.status === "implemented" ? todayIso() : "" } : task);
     if (!commit({ ...project, links: next, tasks })) return;
     notify(patch.status === "implemented" ? "اجرای این لینک در سوابق پروژه ثبت شد." : "لینک به برنامهٔ اجرا برگشت.");
@@ -59,7 +66,7 @@ export function PageRelationships({ project, onProjectChange, readOnly = false, 
   const pageLink = (id: string) => { const page = pages.get(id); const url = canonicalPageUrl(page?.url, project.domain); return url ? <a className="relationship-page-link" href={url} target="_blank" rel="noopener noreferrer">{pageName(id)}<ArrowUpLeft size={14}/></a> : <span>{pageName(id)}</span>; };
   const displayedCount = tab === "suggestions" ? suggestions.length : tab === "links" ? registered.length : overlaps.length;
 
-  return <section className="page-relationships" aria-labelledby="page-relationships-title">
+  return <section className="page-relationships" aria-labelledby="page-relationships-title" data-dirty={dirty ? "true" : undefined}>
     <div className="relationships-heading"><span className="relationships-icon"><Link2 size={22}/></span><div><h2 id="page-relationships-title">ارتباط صفحات و لینک‌سازی داخلی</h2><p>پیشنهادهای مرتبط را بررسی و اجرای واقعی لینک‌ها را ثبت کنید.</p></div></div>
     <div className="relationships-summary"><span><strong>{number(analysis.suggestions.length)}</strong> پیشنهاد لینک</span><span><strong>{number(links.filter((link) => link.status === "planned").length)}</strong> لینک برنامه‌ریزی‌شده</span><span><strong>{number(analysis.overlaps.length)}</strong> همپوشانی قابل بررسی</span></div>
     <div className="relationships-toolbar"><div className="relationships-tabs" role="group" aria-label="نمای ارتباط صفحات">{([ ["suggestions", "پیشنهاد لینک"], ["links", "ارتباط‌های ثبت‌شده"], ["overlaps", "همپوشانی هدف"] ] as const).map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} onClick={() => { setTab(value); setVisible(30); }}>{label}</button>)}</div><label className="relationships-search"><Search size={15}/><input aria-label="جست‌وجوی ارتباط صفحات" placeholder="جست‌وجوی صفحه یا عبارت…" value={query} onChange={(event) => { setQuery(event.target.value); setVisible(30); }}/></label></div>

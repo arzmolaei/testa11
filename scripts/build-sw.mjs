@@ -9,8 +9,12 @@ async function walk(path) {
   }
 }
 await walk("dist");
+files.sort();
 const hash = createHash("sha256");
-for (const f of files) hash.update(await readFile(`dist${f}`));
+for (const f of files) {
+  hash.update(f).update('\0');
+  hash.update(await readFile(`dist${f}`));
+}
 const version = hash.digest("hex").slice(0, 14);
 await writeFile(
   "dist/sw.js",
@@ -35,7 +39,13 @@ async function offlineShell(){
 self.addEventListener('fetch',e=>{
   const u=new URL(e.request.url);
   if(e.request.method!=='GET'||u.origin!==self.location.origin||u.pathname.startsWith('/api/'))return;
-  if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(offlineShell));return;}
-  e.respondWith(caches.match(e.request,{ignoreVary:true}).then(c=>c||fetch(e.request)));
+  if(e.request.mode==='navigate'){
+    e.respondWith(fetch(e.request).then(r=>r.status>=500?offlineShell():r).catch(offlineShell));return;
+  }
+  // Fixed-path icons and the manifest must come from the active release first.
+  // Older caches remain a fallback for a tab that still requests an old chunk.
+  e.respondWith(caches.open(CACHE).then(c=>c.match(e.request,{ignoreVary:true}))
+    .then(c=>c||caches.match(e.request,{ignoreVary:true}))
+    .then(c=>c||fetch(e.request)));
 });`,
 );

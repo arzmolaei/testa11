@@ -117,22 +117,40 @@ export function chunkJSON(serialized: string): string[] {
   return chunks;
 }
 
-async function rateLimit(request: Request, db: D1Database) {
+async function rateLimit(request: Request, db: D1Database, operation: "login" | "password", account: string) {
   const now = Math.floor(Date.now() / 1000);
   const ip = request.headers.get("CF-Connecting-IP") || "local-development";
-  const ipHash = base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(ip))));
-  const attempt = await db.prepare(
-    "INSERT INTO seo_login_attempts (ip_hash, attempts, window_start) VALUES (?, 1, ?) ON CONFLICT(ip_hash) DO UPDATE SET attempts = CASE WHEN window_start <= ? THEN 1 ELSE attempts + 1 END, window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END WHERE attempts <= 10 OR window_start <= ? RETURNING attempts",
-  ).bind(ipHash, now, now - 900, now - 900, now, now - 900).first<{ attempts: number }>();
-  if (!attempt || attempt.attempts > 10) throw new AuthError(429, "TOO_MANY_ATTEMPTS");
+  // A valid teammate must not clear somebody else's failed-login counter.
+  // Hash both values so neither IPs nor account names enter the attempts table.
+  const opaque = async (parts: string[]) => base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify(parts)))));
+  const [overallHash, accountHash] = await Promise.all([opaque([ip, operation]), opaque([ip, operation, account])]);
+  // Remove expired unknown-user counters even if nobody successfully logs in.
+  await db.prepare("DELETE FROM seo_login_attempts WHERE window_start <= ?").bind(now - 900).run();
+  async function reserve(hash: string, limit: number) {
+    const attempt = await db.prepare(
+      "INSERT INTO seo_login_attempts (ip_hash, attempts, window_start) VALUES (?, 1, ?) ON CONFLICT(ip_hash) DO UPDATE SET attempts = CASE WHEN window_start <= ? THEN 1 ELSE attempts + 1 END, window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END WHERE attempts <= ? OR window_start <= ? RETURNING attempts, window_start",
+    ).bind(hash, now, now - 900, now - 900, now, limit, now - 900).first<{ attempts: number; window_start: number }>();
+    if (!attempt || attempt.attempts > limit) throw new AuthError(429, "TOO_MANY_ATTEMPTS");
+    return attempt.window_start;
+  }
+  // This bound precedes creation of an account-specific counter. Rotating
+  // unregistered usernames cannot fill the table or bypass the IP limit.
+  const overallWindow = await reserve(overallHash, 100);
+  const accountWindow = await reserve(accountHash, 10);
   return async () => {
-    await db.prepare("DELETE FROM seo_login_attempts WHERE ip_hash = ? OR window_start < ?").bind(ipHash, now - 86400).run();
+    await db.batch([
+      db.prepare("DELETE FROM seo_login_attempts WHERE ip_hash = ? AND window_start = ?").bind(accountHash, accountWindow),
+      // Remove this successful request from the aggregate; keep all failures.
+      // A delayed response must not decrement a newer time window's counter.
+      db.prepare("UPDATE seo_login_attempts SET attempts = attempts - 1 WHERE ip_hash = ? AND window_start = ? AND attempts > 0").bind(overallHash, overallWindow),
+    ]);
   };
 }
 
 async function login(request: Request, env: Env & { DB: D1Database; APP_PASSWORD: string }) {
   const input = await readJSON(request, 4096);
-  const complete = await rateLimit(request, env.DB);
+  const name = record(input) && typeof input.username === "string" ? input.username.trim().toLowerCase() : "alireza";
+  const complete = await rateLimit(request, env.DB, "login", name);
   const { token, ...session } = await new Accounts(env.DB, env.APP_PASSWORD).login(input);
   await complete();
   return json({ authenticated: true, ...session }, 200, { "Set-Cookie": cookie(request, token) });
@@ -259,7 +277,7 @@ async function handle(request: Request, env: Env) {
   if (path === "/api/me" && request.method === "GET") return json(session);
   if (path === "/api/password" && request.method === "POST") {
     const input = await readJSON(request, 4096);
-    const complete = await rateLimit(request, env.DB);
+    const complete = await rateLimit(request, env.DB, "password", session.user.username);
     const { token, ...changed } = await accounts.changePassword(session.user.id, input);
     await complete();
     return json(changed, 200, { "Set-Cookie": cookie(request, token) });

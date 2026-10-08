@@ -70,6 +70,10 @@ export function authErrorMessage(code: string): string {
     INVALID_NAME: "نام نمایشی را وارد کنید؛ حداکثر ۸۰ نویسه.",
     INVALID_INPUT: "اطلاعات واردشده را بررسی کنید.",
     INVALID_JSON: "اطلاعات ارسالی معتبر نیست. دوباره تلاش کنید.",
+    INVALID_RESPONSE: "پاسخ سرویس ورود معتبر نیست. کمی بعد دوباره تلاش کنید.",
+    INVALID_REQUEST: "اطلاعات واردشده را بررسی کنید.",
+    ORIGIN_DENIED: "درخواست از این نشانی مجاز نیست. برنامه را از دامنه اصلی باز کنید.",
+    CLOUD_NOT_CONFIGURED: "اتصال ابری و رمز ورود هنوز تنظیم نشده‌اند.",
     ORIGIN_NOT_ALLOWED: "درخواست از این نشانی مجاز نیست. برنامه را از دامنه اصلی باز کنید.",
     BAD_ORIGIN: "درخواست از این نشانی مجاز نیست. برنامه را از دامنه اصلی باز کنید.",
     SERVICE_UNAVAILABLE: "سرویس ابری در دسترس نیست. کمی بعد دوباره تلاش کنید.",
@@ -91,14 +95,19 @@ export async function authRequest<T>(
     signal: options.signal ?? AbortSignal.timeout(15_000),
     cache: "no-store",
   });
+  if (response.status === 401 && options.notifyUnauthorized !== false) {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
   const isJSON = response.headers.get("Content-Type")?.includes("application/json");
   if (!isJSON) throw new AuthApiError("API_UNAVAILABLE", response.status);
-  const value = await response.json();
+  let value: Record<string, unknown>;
+  try {
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid API response");
+    value = parsed as Record<string, unknown>;
+  } catch { throw new AuthApiError("INVALID_RESPONSE", response.status); }
   if (!response.ok) {
-    if (response.status === 401 && options.notifyUnauthorized !== false) {
-      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
-    }
-    throw new AuthApiError(value.error || "SERVICE_UNAVAILABLE", response.status);
+    throw new AuthApiError(typeof value.error === "string" ? value.error : "SERVICE_UNAVAILABLE", response.status);
   }
   return value as T;
 }

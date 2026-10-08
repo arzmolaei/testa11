@@ -15,6 +15,11 @@ describe("local project workflow", () => {
     expect(getProjectActions(linked).some((action) => action.id.startsWith("group:"))).toBe(false);
   });
 
+  it("does not treat a broad topic cluster as proof that every intent already has a target", () => {
+    const p = project({ keywords: [{ id: "purchase", keyword: "خرید دوربین داهوا", group: "دوربین", intent: "تراکنشی" }], pages: [page("training", { cluster: "دوربین", pkw: "آموزش نصب دوربین داهوا", pageType: "مقاله" })] });
+    expect(getProjectActions(p).find((action) => action.id.startsWith("group:"))).toMatchObject({ keywordId: "purchase", view: "keywords" });
+  });
+
   it("uses stable page and content ids and distinguishes overdue publication from already published content", () => {
     const p = project({ pages: [page("stable-id", { pageId: "P-999" })], content: [ { id: "content1", targetPage: "stable-id", topic: "راهنما", publishDate: "2026-10-06", writingStatus: "Writing" }, { id: "content2", topic: "منتشرشده", publishDate: "2026-10-01", writingStatus: "Published" } ] });
     const action = getProjectActions(p, "2026-10-07").find((item) => item.id === "content:content1:overdue");
@@ -45,6 +50,16 @@ describe("local project workflow", () => {
     expect(actions[0].reason).toContain("هم‌طول‌بودن");
   });
 
+  it("uses the newest recorded result and resolves legacy page display codes", () => {
+    const p = project({ pages: [page("stable", { pageId: "P-001" })], results: [
+      { id: "old", pageId: "P-001", lastChecked: "2026-09-01", previousClicks: 100, clicks: 0, result: "Dropping" },
+      { id: "latest", pageId: "stable", lastChecked: "2026-10-07", previousClicks: 100, clicks: 120 },
+    ] });
+    expect(getProjectActions(p).filter((action) => action.id.startsWith("result:"))).toEqual([]);
+    p.results.push({ id: "new-decline", pageId: "P-001", lastChecked: "2026-10-08", previousClicks: 120, clicks: 0 });
+    expect(getProjectActions(p).filter((action) => action.id.startsWith("result:"))).toEqual([expect.objectContaining({ id: "result:stable:decline", pageId: "stable", view: "results" })]);
+  });
+
   it("builds an editable source-based scaffold using project playbook and existing outline, FAQ and CTA", () => {
     const p = project({ keywords: [{ id: "k", keyword: "دوربین مداربسته چیست" }], playbook: { id: "template", label: "الگو", audience: "مدیران ساختمان", conversionGoal: "تماس با مشاور", briefTemplate: "طرح الگو" } });
     const row = page("a", { supporting: "دوربین مداربسته چیست", h2Ideas: "طرح دستی", faq: "پرسش دستی", cta: "دعوت دستی" });
@@ -55,6 +70,26 @@ describe("local project workflow", () => {
     expect(brief.contentNotes).toContain("منبع معتبر");
     expect(JSON.stringify({ p, row })).toBe(before);
     expect(buildBrief(p, page("b")).mainSections).toBe("طرح الگو");
+  });
+
+  it("takes FAQ from explicitly linked keywords and skips excluded questions", () => {
+    const p = project({ keywords: [
+      { id: "assigned", keyword: "چگونه دوربین را وصل کنیم", targetPage: "a" },
+      { id: "excluded", keyword: "دوربین مداربسته چیست", decision: "Exclude", targetPage: "a" },
+      { id: "other", keyword: "چرا دوربین خاموش میشود", targetPage: "b" },
+    ] });
+    expect(buildBrief(p, page("a", { supporting: "دوربین مداربسته چیست" })).faq).toBe("چگونه دوربین را وصل کنیم");
+  });
+
+  it("keeps generated fields within storage limits without appending to manual writer notes", () => {
+    const p = project({ keywords: Array.from({ length: 1200 }, (_, index) => ({ id: `question-${index}`, keyword: `چگونه ${"ا".repeat(100)} ${index}`, targetPage: "a" })) });
+    const manual = "م".repeat(100000);
+    const brief = buildBrief(p, page("a", { supporting: "ا".repeat(100000), contentNotes: manual }));
+    expect(String(brief.pageBrief).length).toBeLessThanOrEqual(100000);
+    expect(String(brief.pageBrief)).toContain("ادامهٔ عبارت‌های ثبت‌شده");
+    expect(String(brief.faq).length).toBeLessThanOrEqual(100000);
+    expect(String(brief.faq)).toContain("ادامهٔ عبارت‌های ثبت‌شده");
+    expect(brief.contentNotes).toBe(manual);
   });
 });
 
@@ -90,8 +125,22 @@ describe("page relationship evidence", () => {
   it("canonicalizes safe site-relative URLs and suppresses links between records representing the same URL", () => {
     expect(canonicalPageUrl("/cctv/#section", "example.com")).toBe("https://example.com/cctv/");
     expect(canonicalPageUrl("javascript:alert(1)", "example.com")).toBeNull();
+    expect(canonicalPageUrl("https://user:secret@example.com/cctv/", "example.com")).toBeNull();
     const p = project({ pages: [page("a", { url: "/cctv/" }), page("b", { url: "https://example.com/cctv/#x" })] });
     expect(analyzePageRelationships(p).suggestions).toHaveLength(0);
+  });
+
+  it("does not count draft sources or aliases of the same URL as incoming web links", () => {
+    const p = project({ pages: [page("a", { url: "/cctv/" }), page("alias", { url: "https://example.com/cctv/#x" }), page("draft", { existing: "New", status: "Mapping" })], links: [
+      { id: "self-url", fromPageId: "alias", toPageId: "a", status: "implemented" },
+      { id: "not-live", fromPageId: "draft", toPageId: "a", status: "implemented" },
+    ] });
+    expect(analyzePageRelationships(p).orphanPageIds).toContain("a");
+  });
+
+  it("does not count legacy notes explicitly stating that incoming links are absent", () => {
+    const p = project({ pages: [page("a", { linksIn: "ندارد" }), page("b", { linksIn: "0" }), page("c", { linksIn: "لینک ورودی ندارد" }), page("d", { linksIn: "لینک ثبت‌شده" })] });
+    expect(analyzePageRelationships(p).orphanPageIds).toEqual(["a", "b", "c"]);
   });
 
   it("bounds suggestions for large topic collections rather than producing an all-to-all plan", () => {

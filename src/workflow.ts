@@ -1,4 +1,4 @@
-import { normalizeKeyword } from "./domain";
+import { normalizeKeyword, resultLookup } from "./domain";
 import { formatDate, todayIso, toIsoDate } from "./dates";
 import { buildSearchConsoleInsights } from "./search-console";
 import type { Project, Row } from "./types";
@@ -16,6 +16,7 @@ export type ProjectAction = {
 };
 type WorkflowProject = Project & { tasks?: Row[]; links?: Row[] };
 const text = (value: unknown) => String(value ?? "").trim();
+const boundedGeneratedText = (value: string) => value.length <= 100000 ? value : `${value.slice(0, 99920)}\nادامهٔ عبارت‌های ثبت‌شده را در کلمات و اطلاعات صفحه بررسی کنید.`;
 const norm = (value: unknown) => normalizeKeyword(text(value));
 const split = (value: unknown) => text(value).split(/[\n،,;؛]+/).map((item) => item.trim()).filter(Boolean);
 const pageName = (page: Row) => text(page.target || page.pkw || page.pageId) || "صفحهٔ بدون نام";
@@ -47,10 +48,8 @@ export function getProjectActions(project: WorkflowProject, today = todayIso()):
   const add = (action: ProjectAction) => { if (!tracked.has(action.id)) actions.push(action); };
   const pages = new Map(project.pages.map((page) => [page.id, page]));
   const mapped = new Set<string>();
-  const clusters = new Set<string>();
   for (const page of project.pages) {
     for (const phrase of pageKeywordPhrases(page)) mapped.add(phrase);
-    if (text(page.cluster)) clusters.add(norm(page.cluster));
   }
   const groups = new Map<string, Row[]>();
   const activeKeywords = project.keywords.filter((row) => row.decision !== "Exclude" && text(row.keyword));
@@ -66,7 +65,7 @@ export function getProjectActions(project: WorkflowProject, today = todayIso()):
   if (uncertain) add({ id: "keywords:intent", title: "نیت‌های نامشخص را بازبینی کنید", reason: `${uncertain.toLocaleString("fa-IR")} کلمه نیت روشن ندارد؛ این موضوع می‌تواند انتخاب مقاله، دسته‌بندی یا خدمات را تغییر دهد.`, priority: "P2", view: "keywords", keywordId: firstUncertain });
   for (const [group, rows] of groups) {
     const unmapped = rows.filter((row) => !pages.has(text(row.targetPage)) && !mapped.has(norm(row.keyword)));
-    if (unmapped.length && !clusters.has(group)) add({ id: `group:${hash(group)}:target`, title: `صفحهٔ هدف گروه «${text(rows[0].group)}» را مشخص کنید`, reason: `${unmapped.length.toLocaleString("fa-IR")} کلمهٔ این گروه به صفحهٔ ثبت‌شده‌ای متصل نیست. وجود صفحه در سایت را پیش از ساخت صفحهٔ تازه بررسی کنید.`, priority: "P1", view: "keywords", keywordId: unmapped[0].id });
+    if (unmapped.length) add({ id: `group:${hash(group)}:target`, title: `صفحهٔ هدف گروه «${text(rows[0].group)}» را مشخص کنید`, reason: `${unmapped.length.toLocaleString("fa-IR")} کلمهٔ این گروه به صفحهٔ ثبت‌شده‌ای متصل نیست. وجود صفحه در سایت را پیش از ساخت صفحهٔ تازه بررسی کنید.`, priority: "P1", view: "keywords", keywordId: unmapped[0].id });
   }
   for (const page of project.pages) {
     const name = pageName(page), p = priority(page.priority);
@@ -87,15 +86,15 @@ export function getProjectActions(project: WorkflowProject, today = todayIso()):
       if (!readiness.ready) add({ id: `content:${content.id}:ready`, title: `اطلاعات تولید «${name}» را کامل کنید`, reason: `موارد باقی‌مانده: ${readiness.missing.join("، ")}.`, priority: "P2", view: "content", contentId: content.id });
     }
   }
-  const declining = new Set<string>();
-  for (const result of project.results) {
-    const page = pages.get(text(result.pageId));
-    const id = text(result.pageId) || result.id;
+  // Older snapshots must not keep a resolved decline in today's queue. Resolve
+  // legacy display codes with the same latest-snapshot rule as page workspaces.
+  const latestResults = [...resultLookup(project.results, project.pages).entries(), ...project.results.filter((row) => !text(row.pageId)).map((row): [string, Row] => [row.id, row])];
+  for (const [id, result] of latestResults) {
+    const page = pages.get(id);
     const clicks = result.clicks === "" || result.clicks == null ? null : Number(result.clicks);
     const previous = result.previousClicks === "" || result.previousClicks == null ? null : Number(result.previousClicks);
     const drop = Number.isFinite(clicks) && Number.isFinite(previous) && previous! > 0 && clicks! < previous! * .8;
-    if (!declining.has(id) && (["Dropping", "Declining", "افت عملکرد"].includes(text(result.result)) || drop)) {
-      declining.add(id);
+    if (["Dropping", "Declining", "افت عملکرد"].includes(text(result.result)) || drop) {
       add({ id: `result:${id}:decline`, title: `افت عملکرد «${page ? pageName(page) : text(result.pkw || result.url) || "صفحه"}» را بررسی کنید`, reason: drop ? `کلیک ثبت‌شده از ${previous!.toLocaleString("fa-IR")} به ${clicks!.toLocaleString("fa-IR")} رسیده است. هم‌طول‌بودن دوره‌ها و فصل‌پذیری را قبل از نتیجه‌گیری بررسی کنید.` : "وضعیت این نتیجه در پروژه «افت عملکرد» ثبت شده است؛ علت افت از این داده به‌تنهایی مشخص نمی‌شود.", priority: "P1", view: "results", ...(page ? { pageId: page.id } : {}) });
     }
   }
@@ -112,16 +111,16 @@ export function buildBrief(project: Project, page: Row): Partial<Row> {
   const subject = text(page.pkw || page.target), name = pageName(page);
   const supporting = split(page.supporting);
   const relevant = new Set(pageKeywordPhrases(page));
-  const questions = project.keywords.filter((keyword) => relevant.has(norm(keyword.keyword)) && /(?:چگونه|چطور|چیست|چرا|آیا|چه |کدام|\?|؟)/.test(text(keyword.keyword))).map((keyword) => text(keyword.keyword));
+  const questions = project.keywords.filter((keyword) => keyword.decision !== "Exclude" && (text(keyword.targetPage) === page.id || relevant.has(norm(keyword.keyword))) && /(?:چگونه|چطور|چیست|چرا|آیا|چه |کدام|\?|؟)/.test(text(keyword.keyword))).map((keyword) => text(keyword.keyword));
   const commercial = /(?:دسته|محصول|برند|خدمات|لندینگ|PLP|PDP|Service)/i.test(text(page.pageType));
   const sections = text(page.mainSections || page.h2Ideas || project.playbook?.briefTemplate) || (commercial ? ["معرفی و کاربرد", "معیارهای انتخاب", "گزینه‌ها و ویژگی‌های تأییدشده", "شرایط خرید یا دریافت خدمت", "پاسخ به پرسش‌های متداول"].join("\n") : ["پاسخ کوتاه به پرسش اصلی", "توضیح موضوع و پیش‌نیازها", "مراحل یا معیارهای بررسی", "محدودیت‌ها و نکات کاربردی", "پاسخ به پرسش‌های متداول"].join("\n"));
   return {
-    pageBrief: [`موضوع: ${name}`, `کلمهٔ اصلی: ${subject || "نیاز به انتخاب"}`, `نوع صفحه: ${text(page.pageType) || "نیاز به انتخاب"}`, `مخاطب: ${text(project.playbook?.audience || project.market) || "پیش از نگارش، مخاطب و نیاز او را مشخص کنید."}`, `هدف پروژه: ${text(project.goal || project.playbook?.conversionGoal) || "هدف کسب‌وکار و اقدام مورد انتظار را مشخص کنید."}`, supporting.length ? `عبارت‌های مرتبط ثبت‌شده: ${supporting.join("، ")}` : "عبارت‌های مرتبط: در صورت نیاز از کلمات همین پروژه انتخاب کنید.", "این پیش‌نویس باید با هدف جست‌وجو و اطلاعات واقعی کسب‌وکار بازبینی شود."].join("\n\n"),
+    pageBrief: boundedGeneratedText([`موضوع: ${name}`, `کلمهٔ اصلی: ${subject || "نیاز به انتخاب"}`, `نوع صفحه: ${text(page.pageType) || "نیاز به انتخاب"}`, `مخاطب: ${text(project.playbook?.audience || project.market) || "پیش از نگارش، مخاطب و نیاز او را مشخص کنید."}`, `هدف پروژه: ${text(project.goal || project.playbook?.conversionGoal) || "هدف کسب‌وکار و اقدام مورد انتظار را مشخص کنید."}`, supporting.length ? `عبارت‌های مرتبط ثبت‌شده: ${supporting.join("، ")}` : "عبارت‌های مرتبط: در صورت نیاز از کلمات همین پروژه انتخاب کنید.", "این پیش‌نویس باید با هدف جست‌وجو و اطلاعات واقعی کسب‌وکار بازبینی شود."].join("\n\n")),
     mainSections: sections,
     h2Ideas: text(page.h2Ideas) || sections,
-    faq: text(page.faq) || [...new Set(questions)].join("\n"),
+    faq: text(page.faq) || boundedGeneratedText([...new Set(questions)].join("\n")),
     cta: text(page.cta || project.playbook?.conversionGoal) || (commercial ? "اقدام مورد انتظار و مسیر خرید یا درخواست خدمت را مشخص کنید." : "قدم بعدی متناسب با موضوع و نیاز خواننده را مشخص کنید."),
-    contentNotes: [text(page.contentNotes), "راهنمای نویسنده: فقط از اطلاعات تأییدشده استفاده کنید؛ برای قیمت، ادعا، آمار و مشخصات منبع معتبر ثبت کنید. پاسخ روشن را بر تکرار کلمات ترجیح دهید. لینک‌های داخلی را در جای مرتبط پیشنهاد دهید."].filter(Boolean).join("\n\n"),
+    contentNotes: text(page.contentNotes) || "راهنمای نویسنده: فقط از اطلاعات تأییدشده استفاده کنید؛ برای قیمت، ادعا، آمار و مشخصات منبع معتبر ثبت کنید. پاسخ روشن را بر تکرار کلمات ترجیح دهید. لینک‌های داخلی را در جای مرتبط پیشنهاد دهید.",
   };
 }
 
@@ -136,7 +135,7 @@ export function canonicalPageUrl(value: unknown, domain: string): string | null 
   try {
     const base = domain ? (/^https?:\/\//i.test(domain) ? domain : `https://${domain}`) : undefined;
     const url = new URL(raw, base);
-    if (!["http:", "https:"].includes(url.protocol)) return null;
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
     url.hash = "";
     return url.href;
   } catch { return null; }
@@ -168,9 +167,13 @@ export function analyzePageRelationships(project: WorkflowProject): PageRelation
   const eligibleIds = new Set(eligiblePages.map((page) => page.id));
   const links = (project.links || []).filter((link) => pages.has(text(link.fromPageId)) && pages.has(text(link.toPageId)) && link.fromPageId !== link.toPageId);
   const recorded = new Set(links.map((link) => `${link.fromPageId}:${link.toPageId}`));
-  const incoming = new Set(links.filter((link) => link.status === "implemented").map((link) => text(link.toPageId)));
+  const incoming = new Set(links.filter((link) => link.status === "implemented" && eligibleIds.has(text(link.fromPageId)) && eligibleIds.has(text(link.toPageId)) && canonicalPageUrl(pages.get(text(link.fromPageId))!.url, project.domain) !== canonicalPageUrl(pages.get(text(link.toPageId))!.url, project.domain)).map((link) => text(link.toPageId)));
   // Legacy notes can confirm registered links; unregistered web links cannot be inferred.
-  for (const target of eligiblePages) if (text(target.linksIn)) incoming.add(target.id);
+  for (const target of eligiblePages) {
+    const note = norm(target.linksIn);
+    const explicitlyAbsent = /^(?:0|none|no links?|ندارد|خیر|[—-]|بدون لینک(?: ورودی)?|(?:هیچ )?لینک(?: ورودی)?ی? ندارد)$/u.test(note);
+    if (note && !explicitlyAbsent) incoming.add(target.id);
+  }
   const topics = new Map<string, Set<string>>(), index = new Map<string, string[]>();
   for (const page of eligiblePages) {
     const tokens = new Set([text(page.pkw), ...split(page.supporting)].join(" ").split(/\s+/).map(norm).filter((token) => token.length >= 2 && !stopwords.has(token)));
