@@ -17,10 +17,11 @@ const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 
 export function parseArguments(args) {
   const flags = new Set(args);
-  const known = ['--dry-run', '--device-login', '--reset-password', '--help'];
+  const known = ['--dry-run', '--device-login', '--verify-only', '--reset-password', '--help'];
   for (const flag of flags) if (!known.includes(flag)) throw new Error(`Unknown option: ${flag}`);
   if (flags.has('--dry-run') && flags.has('--reset-password')) throw new Error('--dry-run cannot reset a cloud password.');
-  return { dryRun: flags.has('--dry-run'), deviceLogin: flags.has('--device-login'), resetPassword: flags.has('--reset-password'), help: flags.has('--help') };
+  if (flags.has('--verify-only') && ['--dry-run', '--device-login', '--reset-password'].some(flag => flags.has(flag))) throw new Error('--verify-only cannot be combined with publishing or password options.');
+  return { dryRun: flags.has('--dry-run'), deviceLogin: flags.has('--device-login'), verifyOnly: flags.has('--verify-only'), resetPassword: flags.has('--reset-password'), help: flags.has('--help') };
 }
 
 /** Remove JSONC comments without changing // inside URLs or escaped strings. */
@@ -208,31 +209,82 @@ export async function openApp(url) {
   });
 }
 
+class DeploymentVerificationError extends Error {
+  constructor(stage, message, retryable = false) {
+    super(message);
+    this.name = 'DeploymentVerificationError';
+    this.stage = stage;
+    this.retryable = retryable;
+  }
+}
+
+function connectionProblem(error) {
+  // Do not echo arbitrary network errors: they can contain request details.
+  if (['TimeoutError', 'AbortError'].includes(error?.name)) return 'The HTTPS request timed out.';
+  if (['ENOTFOUND', 'EAI_AGAIN'].includes(error?.cause?.code)) return 'The app address could not be resolved.';
+  return 'The HTTPS request could not be completed from this computer.';
+}
+
 export async function verifyDeployment(url, password, { fetcher = fetch, sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)), log = console.log } = {}) {
+  url = validateWorkerURL(url, new URL(url).hostname.split('.')[0]);
+  const failure = (stage, message, retryable = false) => new DeploymentVerificationError(stage, message, retryable);
   // DNS/TLS propagation can lag a successful publish. Password is sent only to the exact verified HTTPS origin.
   let configured = false;
+  let readinessProblem = 'The cloud connection is not ready.';
   for (let attempt = 0; attempt < 12; attempt++) {
+    log(`Checking published app (attempt ${attempt + 1}/12)...`);
     try {
-      const response = await fetcher(`${url}/api/status`, { redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      const response = await fetcher(`${url}/api/status`, { redirect: 'error', signal: AbortSignal.timeout(15_000) });
       if (response.ok && (await response.json()).configured === true) { configured = true; break; }
-    } catch { /* retry public readiness; never retry failed password guesses */ }
+      readinessProblem = response.ok ? 'The cloud connection is not ready.' : `The app returned HTTP ${response.status}.`;
+    } catch (error) { readinessProblem = connectionProblem(error); }
     if (attempt < 11) { log('Waiting for the published app to become ready...'); await sleep(5000); }
   }
-  if (!configured) throw new Error(`The app is published at ${url}, but its cloud connection is not ready. Rerun this installer to retry without replacing data.`);
-  const login = await fetcher(`${url}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: url }, body: JSON.stringify({ password }), redirect: 'error', signal: AbortSignal.timeout(15_000) });
-  if (login.status === 401) throw new Error('The app password was incorrect. Cloud data and password have not been changed. Rerun the installer and enter the existing app password.');
-  if (!login.ok) throw new Error(`The app login check failed (HTTP ${login.status}). Rerun later to retry.`);
-  const cookie = login.headers.get('set-cookie')?.match(/(?:^|,\s*)seo_session=([^;]+)/)?.[1];
-  if (!cookie) throw new Error('The published app did not return its secure session.');
-  const result = await fetcher(`${url}/api/state`, { headers: { Cookie: `seo_session=${cookie}` }, redirect: 'error', signal: AbortSignal.timeout(20_000) });
-  if (!result.ok) throw new Error(`The database read check failed (HTTP ${result.status}). Rerun the installer to recheck migrations.`);
-  const state = await result.json();
-  if (!Number.isSafeInteger(state.revision) || state.revision < 0 || !Object.hasOwn(state, 'state')) throw new Error('The database returned unexpected data. Existing project data has not been overwritten.');
-  return state.revision;
+  if (!configured) throw failure('status', `The app is published at ${url}, but the readiness check could not finish. ${readinessProblem} Retry with --verify-only; existing data is preserved.`, true);
+
+  const check = async (stage, route, options, timeout, read) => {
+    const label = stage === 'login' ? 'alireza account login' : 'database read';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      log(`Checking ${label} (attempt ${attempt + 1}/3)...`);
+      try {
+        const response = await fetcher(`${url}${route}`, { ...options, redirect: 'error', signal: AbortSignal.timeout(timeout) });
+        if (stage === 'login' && response.status === 401) throw failure(stage, 'The app password was incorrect. Cloud data and password have not been changed. Retry with --verify-only and enter the current alireza account password.');
+        if (response.status === 429) throw failure(stage, 'The app has temporarily limited login checks. Wait before trying again; account passwords have not been changed.');
+        if (!response.ok) {
+          // A lost response or temporary edge failure is safe to retry. Never retry an authorization rejection.
+          const retryable = response.status === 408 || response.status >= 500;
+          await response.body?.cancel().catch(() => {});
+          throw failure(stage, `The ${label} check failed (HTTP ${response.status}).`, retryable);
+        }
+        return await read(response);
+      } catch (error) {
+        const problem = error instanceof DeploymentVerificationError ? error : failure(stage, `The ${label} check could not finish. ${connectionProblem(error)}`, true);
+        if (!problem.retryable || attempt === 2) throw problem;
+        log(`${label} connection interrupted. Retrying in 5 seconds...`);
+        await sleep(5000);
+      }
+    }
+  };
+  const cookie = await check('login', '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: url }, body: JSON.stringify({ password }) }, 30_000, async response => {
+    const value = response.headers.get('set-cookie')?.match(/(?:^|,\s*)seo_session=([^;]+)/)?.[1];
+    if (!value) throw failure('login', 'The published app did not return its secure session.');
+    return value;
+  });
+  return await check('database', '/api/state', { headers: { Cookie: `seo_session=${cookie}` } }, 60_000, async response => {
+    let state;
+    try { state = await response.json(); }
+    catch (error) {
+      if (error instanceof SyntaxError) throw failure('database', 'The database returned unexpected data. Existing project data has not been overwritten.');
+      throw error; // Body timeouts are retried as well as connection timeouts.
+    }
+    if (!state || typeof state !== 'object' || !Number.isSafeInteger(state.revision) || state.revision < 0 || !Object.hasOwn(state, 'state')) throw failure('database', 'The database returned unexpected data. Existing project data has not been overwritten.');
+    return state.revision;
+  });
 }
 
 export async function installCloudflare(options = {}, dependencies = {}) {
   if (options.resetPassword) throw new Error('Change account passwords in the app Account and Team settings. The installer never resets an existing account password.');
+  if (options.verifyOnly && (options.dryRun || options.deviceLogin)) throw new Error('--verify-only cannot be combined with publishing options.');
   const root = dependencies.root || sourceRoot;
   const installDir = path.resolve(dependencies.installDir || process.env.ROOYESH_INSTALL_DIR || path.join(root, '.rooyesh-install'));
   const runner = dependencies.runner || commandRunner();
@@ -240,7 +292,7 @@ export async function installCloudflare(options = {}, dependencies = {}) {
   const prompt = dependencies.prompt || promptText;
   const secret = dependencies.secret || promptHidden;
   const browser = dependencies.openBrowser || openApp;
-  const npmCLI = dependencies.npmCLI || await findNpmCLI();
+  const npmCLI = options.verifyOnly ? undefined : dependencies.npmCLI || await findNpmCLI();
   const wranglerCLI = path.join(root, 'node_modules/wrangler/bin/wrangler.js');
   const env = cloudEnvironment(dependencies.env || process.env, { WRANGLER_LOG_PATH: path.join(installDir, 'wrangler-logs'), npm_config_cache: path.join(installDir, 'npm-cache') });
   const stateFile = path.join(installDir, 'state.json');
@@ -266,6 +318,51 @@ export async function installCloudflare(options = {}, dependencies = {}) {
   let password;
   try {
     log('Alireza SEO Studio installer');
+    const save = () => atomicJSON(stateFile, state);
+    const verifyPublished = async () => {
+      const url = validateWorkerURL(state.url, state.workerName);
+      // Publishing and verification are separate. Keep a working launcher even when this computer loses its connection.
+      log(`App published: ${url}`);
+      try { await writeFile(path.join(installDir, 'Open-Rooyesh.url'), `[InternetShortcut]\r\nURL=${url}\r\n`, { mode: 0o600 }); }
+      catch { log('The app shortcut could not be saved. You can use the app address printed above.'); }
+      state.verificationPending = true;
+      delete state.verifiedAt;
+      await save();
+      log('Owner username: alireza. Your saved account, Worker and database are preserved.');
+      let revision;
+      try { revision = await verifyDeployment(url, password, { fetcher: dependencies.fetcher, sleep: dependencies.sleep, log }); }
+      catch (error) {
+        state.verificationStage = error instanceof DeploymentVerificationError ? error.stage : 'unknown';
+        await save();
+        log(`The app is published, but final verification is unfinished (${state.verificationStage}).`);
+        log('To check it again without rebuilding or publishing: Install-Rooyesh.cmd -VerifyOnly');
+        log(`You can open the app directly: ${url}`);
+        throw error;
+      }
+      password = undefined;
+      state.verificationPending = false;
+      delete state.verificationStage;
+      state.verifiedAt = new Date().toISOString();
+      await save();
+      log(`Installation complete. App: ${url}`);
+      log('Owner username: alireza. Team accounts can be managed inside Account and Team settings.');
+      log(`Database read verified (revision ${revision}). Your password was not saved on this computer.`);
+      log(`To open it later: ${path.join(installDir, 'Open-Rooyesh.url')}`);
+      try { await browser(url); } catch { log(`Open this address in your browser: ${url}`); }
+      return { url, workerName: state.workerName, databaseId: state.databaseId, accountId: state.accountId, revision };
+    };
+    if (options.verifyOnly) {
+      try { state = validateState(JSON.parse(await readFile(stateFile, 'utf8'))); }
+      catch (error) {
+        if (error.code === 'ENOENT') throw new Error('No saved installation was found. Run the normal installer first; --verify-only never creates a new installation.');
+        throw new Error(`Saved installation could not be read: ${error.message}. Keep ${stateFile} for recovery.`);
+      }
+      if (state.deployed !== true || !state.url || !state.accountId || !state.databaseId) throw new Error('The saved app has not been published yet. Run the normal installer to finish publishing.');
+      log('Continuing final verification only. No build, Cloudflare login, migrations, secrets or publishing.');
+      password = await secret('Current alireza password: ');
+      if (!validExistingPassword(password)) throw new Error('Enter the current alireza account password (up to 1024 characters).');
+      return await verifyPublished();
+    }
     log(options.dryRun ? 'Local checks only: no Cloudflare login, resources, or publishing.' : 'The installer will publish your private SEO app to your Cloudflare account.');
     await runner({ command: process.execPath, args: [npmCLI, 'ci', '--no-audit', '--no-fund'], cwd: root, env, label: 'Dependency installation' });
     await runner({ command: process.execPath, args: [npmCLI, 'run', 'build'], cwd: root, env, label: 'App build' });
@@ -299,7 +396,6 @@ export async function installCloudflare(options = {}, dependencies = {}) {
       state = { schema: 1, installationId, workerName: `rooyesh-${installationId}`, databaseName: `rooyesh-${installationId}-db`, createdAt: new Date().toISOString() };
       await atomicJSON(stateFile, state);
     }
-    const save = () => atomicJSON(stateFile, state);
     await atomicJSON(configFile, generatedConfig(state));
     const wrangler = (args, settings = {}) => runner({ command: process.execPath, args: [wranglerCLI, ...args, '--config', configFile], cwd: root, env, label: `Cloudflare ${args[0]}`, ...settings });
     let user;
@@ -398,19 +494,11 @@ export async function installCloudflare(options = {}, dependencies = {}) {
     state.url = url;
     state.deployed = true;
     state.deployedAt = new Date().toISOString();
+    state.verificationPending = true;
+    delete state.verifiedAt;
+    delete state.verificationStage;
     await save();
-    log('Checking login and reading the database...');
-    const revision = await verifyDeployment(url, password, { fetcher: dependencies.fetcher, sleep: dependencies.sleep, log });
-    password = undefined;
-    state.verifiedAt = new Date().toISOString();
-    await save();
-    await writeFile(path.join(installDir, 'Open-Rooyesh.url'), `[InternetShortcut]\r\nURL=${url}\r\n`, { mode: 0o600 });
-    log(`Installation complete. App: ${url}`);
-    log('Owner username: alireza. Team accounts can be managed inside Account and Team settings.');
-    log(`Database read verified (revision ${revision}). Your password was not saved on this computer.`);
-    log(`To open it later: ${path.join(installDir, 'Open-Rooyesh.url')}`);
-    try { await browser(url); } catch { log(`Open this address in your browser: ${url}`); }
-    return { url, workerName: state.workerName, databaseId: state.databaseId, accountId: state.accountId, revision };
+    return await verifyPublished();
   } finally {
     password = undefined;
     await rm(lockFile, { force: true });
@@ -422,7 +510,7 @@ if (import.meta.url === pathToFileURL(path.resolve(process.argv[1] || '')).href)
     const [major, minor] = process.versions.node.split('.').map(Number);
     if (major < 22 || (major === 22 && minor < 13)) throw new Error('Node.js 22.13 or newer is required. Run Install-Rooyesh.cmd.');
     const options = parseArguments(process.argv.slice(2));
-    if (options.help) console.log('Usage: node scripts/install-cloudflare.mjs [--dry-run] [--device-login]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nRerun the same installer after a failure; resources and existing projects are preserved.\nAccount passwords are changed inside the app, never by updating.');
+    if (options.help) console.log('Usage: node scripts/install-cloudflare.mjs [--dry-run] [--device-login] [--verify-only]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nUse --verify-only after a published app failed final verification: no build or cloud resource changes.\nRerun the normal installer for updates; resources and existing projects are preserved.\nAccount passwords are changed inside the app, never by updating.');
     else await installCloudflare(options);
   } catch (error) {
     console.error(`\nInstallation stopped: ${error.message}`);

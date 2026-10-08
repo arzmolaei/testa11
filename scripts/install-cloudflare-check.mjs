@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { installCloudflare, LOGIN_SCOPES, parseArguments, parseJSONC, parseCommandJSON, cloudEnvironment, validPassword, validExistingPassword, validateWorkerURL, deploymentURL } from './install-cloudflare.mjs';
+import { createServer } from 'node:http';
+import { installCloudflare, verifyDeployment, LOGIN_SCOPES, parseArguments, parseJSONC, parseCommandJSON, cloudEnvironment, validPassword, validExistingPassword, validateWorkerURL, deploymentURL } from './install-cloudflare.mjs';
 
 const firstAccount = 'a'.repeat(32), secondAccount = 'b'.repeat(32);
 const dbId = '12345678-1234-4321-9876-123456789abc';
@@ -306,4 +307,290 @@ test('first Worker secret-list not-found is handled while authorization errors s
   await assert.rejects(installCloudflare({}, denied.dependencies), /Cloudflare secret list failed/);
   assert.equal(denied.secretPrompts.length, 0);
   assert.equal(denied.calls.some(call => hasCommand(call, 'secret', 'put') || hasCommand(call, 'deploy')), false);
+});
+
+test('a lost login response and temporary edge failure retry the same password without replacing secrets', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  const logins = [];
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/login')) {
+      logins.push({ url, options });
+      if (logins.length === 1) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      if (logins.length === 2) return new Response('temporary edge failure', { status: 502 });
+    }
+    return original(url, options);
+  };
+  const result = await installCloudflare({}, f.dependencies);
+  assert.equal(result.revision, 7);
+  assert.equal(logins.length, 3);
+  assert.ok(logins.every(request => JSON.parse(request.options.body).password === password && request.options.redirect === 'error'));
+  assert.equal(f.calls.filter(call => hasCommand(call, 'secret', 'put')).length, 1);
+  assert.equal(f.calls.filter(call => hasCommand(call, 'deploy')).length, 1);
+  assert.ok(f.messages.every(message => !message.includes(password)));
+});
+
+test('database connection timeouts and edge failures retry reads without repeating login or writing projects', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  const reads = [];
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/state')) {
+      reads.push(options);
+      if (reads.length === 1) throw new DOMException('Timed out', 'TimeoutError');
+      if (reads.length === 2) return new Response('edge timeout', { status: 524 });
+    }
+    return original(url, options);
+  };
+  const result = await installCloudflare({}, f.dependencies);
+  assert.equal(result.revision, 7);
+  assert.equal(reads.length, 3);
+  assert.ok(reads.every(options => options.method === undefined && options.headers.Cookie === 'seo_session=test-session'));
+  assert.equal(f.requests.filter(request => request.url.endsWith('/api/login')).length, 1);
+});
+
+test('a response body timeout is retried before treating the database as verified', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  let reads = 0;
+  f.dependencies.fetcher = async (url, options) => {
+    const response = await original(url, options);
+    if (url.endsWith('/api/state') && ++reads === 1) {
+      response.json = async () => { throw new DOMException('Body download timed out', 'TimeoutError'); };
+    }
+    return response;
+  };
+  assert.equal((await installCloudflare({}, f.dependencies)).revision, 7);
+  assert.equal(reads, 2);
+});
+
+test('published installation stays recoverable after verification timeout and resumes without any build or cloud command', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  let loginAttempts = 0;
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/login')) {
+      loginAttempts++;
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    }
+    return original(url, options);
+  };
+  await assert.rejects(installCloudflare({}, f.dependencies), error => error.stage === 'login' && /HTTPS request timed out/.test(error.message));
+  assert.equal(loginAttempts, 3);
+  const stateFile = path.join(f.installDir, 'state.json');
+  const pendingText = await readFile(stateFile, 'utf8');
+  const pending = JSON.parse(pendingText);
+  assert.equal(pending.deployed, true);
+  assert.equal(pending.verificationPending, true);
+  assert.equal(pending.verificationStage, 'login');
+  assert.equal(pending.verifiedAt, undefined);
+  assert.equal(pending.databaseId, dbId);
+  assert.ok(!pendingText.includes(password));
+  assert.match(await readFile(path.join(f.installDir, 'Open-Rooyesh.url'), 'utf8'), new RegExp(`URL=${pending.url}`));
+  assert.equal(f.opened.length, 0);
+  assert.ok(!f.messages.some(message => message.startsWith('Installation complete.')));
+  await assert.rejects(readFile(path.join(f.installDir, 'install.lock')), { code: 'ENOENT' });
+
+  f.dependencies.fetcher = original;
+  f.dependencies.runner = async () => { assert.fail('verification must not run npm or Wrangler'); };
+  delete f.dependencies.npmCLI;
+  const result = await installCloudflare({ verifyOnly: true }, f.dependencies);
+  assert.equal(result.url, pending.url);
+  assert.equal(result.revision, 7);
+  const complete = JSON.parse(await readFile(stateFile, 'utf8'));
+  for (const key of ['workerName', 'databaseId', 'accountId', 'deployedAt']) assert.equal(complete[key], pending[key]);
+  assert.equal(complete.verificationPending, false);
+  assert.equal(complete.verificationStage, undefined);
+  assert.ok(complete.verifiedAt);
+  assert.equal(f.cloud.databases.length, 1);
+  assert.equal(f.cloud.secrets.length, 1);
+  assert.equal(f.calls.filter(call => hasCommand(call, 'deploy')).length, 1);
+  assert.deepEqual(f.opened, [pending.url]);
+});
+
+test('verification-only reads a legacy saved installation and preserves the exact current account password', async t => {
+  const currentPassword = '  Current-account-password  ';
+  const f = await fixture(t, { secretAnswers: [password, password, currentPassword] });
+  await installCloudflare({}, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json');
+  const state = JSON.parse(await readFile(stateFile, 'utf8'));
+  delete state.verificationPending;
+  delete state.verifiedAt;
+  await writeFile(stateFile, JSON.stringify(state));
+  const before = f.calls.length;
+  const original = f.dependencies.fetcher;
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/login')) {
+      assert.equal(JSON.parse(options.body).password, currentPassword);
+      return Response.json({ authenticated: true }, { headers: { 'set-cookie': 'seo_session=test-session; HttpOnly; Secure; Path=/' } });
+    }
+    return original(url, options);
+  };
+  const result = await installCloudflare({ verifyOnly: true }, f.dependencies);
+  assert.equal(result.url, state.url);
+  assert.equal(f.calls.length, before);
+  assert.ok(!JSON.stringify(JSON.parse(await readFile(stateFile, 'utf8'))).includes(currentPassword));
+});
+
+test('verification-only with no saved identity never creates another installation or prompts for a password', async t => {
+  const f = await fixture(t);
+  await assert.rejects(installCloudflare({ verifyOnly: true }, f.dependencies), /No saved installation/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.secretPrompts.length, 0);
+  await assert.rejects(readFile(path.join(f.installDir, 'state.json')), { code: 'ENOENT' });
+});
+
+test('verification-only preserves damaged identity files and stops before password entry or network requests', async t => {
+  const f = await fixture(t);
+  await mkdir(f.installDir, { recursive: true });
+  const stateFile = path.join(f.installDir, 'state.json');
+  await writeFile(stateFile, 'broken saved identity');
+  await assert.rejects(installCloudflare({ verifyOnly: true }, f.dependencies), /Saved installation could not be read/);
+  assert.equal(await readFile(stateFile, 'utf8'), 'broken saved identity');
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.secretPrompts.length, 0);
+});
+
+test('verification-only cannot send a password to a modified or redirected installation address', async t => {
+  const f = await fixture(t);
+  await installCloudflare({}, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json');
+  const state = JSON.parse(await readFile(stateFile, 'utf8'));
+  state.url += '.evil.example';
+  await writeFile(stateFile, JSON.stringify(state));
+  const beforeRequests = f.requests.length, beforePrompts = f.secretPrompts.length, beforeCalls = f.calls.length;
+  await assert.rejects(installCloudflare({ verifyOnly: true }, f.dependencies), /valid app address/);
+  assert.equal(f.requests.length, beforeRequests);
+  assert.equal(f.secretPrompts.length, beforePrompts);
+  assert.equal(f.calls.length, beforeCalls);
+});
+
+test('authorization and rate-limit responses stop after one login attempt', async t => {
+  for (const status of [403, 429]) {
+    const f = await fixture(t);
+    const original = f.dependencies.fetcher;
+    let logins = 0;
+    f.dependencies.fetcher = async (url, options) => {
+      if (url.endsWith('/api/login')) { logins++; return Response.json({ error: 'denied' }, { status }); }
+      return original(url, options);
+    };
+    await assert.rejects(installCloudflare({}, f.dependencies), error => error.stage === 'login' && error.retryable === false);
+    assert.equal(logins, 1);
+    assert.equal(f.requests.some(request => request.url.endsWith('/api/state')), false);
+    assert.equal(f.cloud.secrets.length, 1);
+  }
+});
+
+test('an expired session stops database checks immediately without repeating password attempts', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  let reads = 0;
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/state')) { reads++; return Response.json({ error: 'UNAUTHORIZED' }, { status: 401 }); }
+    return original(url, options);
+  };
+  await assert.rejects(installCloudflare({}, f.dependencies), error => error.stage === 'database' && error.retryable === false);
+  assert.equal(reads, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith('/api/login')).length, 1);
+});
+
+test('invalid database payloads cannot complete installation or cause project writes', async t => {
+  for (const state of [null, { state: null, revision: -1 }, { revision: 7 }, { state: null, revision: 1.5 }]) {
+    const f = await fixture(t);
+    const original = f.dependencies.fetcher;
+    let reads = 0;
+    f.dependencies.fetcher = async (url, options) => {
+      if (url.endsWith('/api/state')) { reads++; return Response.json(state); }
+      return original(url, options);
+    };
+    await assert.rejects(installCloudflare({}, f.dependencies), /database returned unexpected data/);
+    assert.equal(reads, 1);
+    assert.equal(f.opened.length, 0);
+    assert.equal(JSON.parse(await readFile(path.join(f.installDir, 'state.json'), 'utf8')).verifiedAt, undefined);
+  }
+});
+
+test('readiness waits for a configured response before transmitting account credentials', async t => {
+  const f = await fixture(t);
+  const original = f.dependencies.fetcher;
+  let checks = 0;
+  f.dependencies.fetcher = async (url, options) => {
+    if (url.endsWith('/api/status') && ++checks < 4) return Response.json({ configured: false });
+    if (url.endsWith('/api/login')) assert.equal(checks, 4);
+    return original(url, options);
+  };
+  await installCloudflare({}, f.dependencies);
+  assert.equal(checks, 4);
+});
+
+test('verification-only network failure is bounded and leaves the published identity and password unchanged', async t => {
+  const f = await fixture(t);
+  await installCloudflare({}, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json');
+  const previous = JSON.parse(await readFile(stateFile, 'utf8'));
+  const before = f.calls.length;
+  let checks = 0;
+  f.dependencies.fetcher = async (url) => {
+    assert.ok(url.endsWith('/api/status'), 'no password may be sent before readiness');
+    checks++;
+    throw new Error(`Network failure including ${password}`);
+  };
+  await assert.rejects(installCloudflare({ verifyOnly: true }, f.dependencies), error => error.stage === 'status' && !error.message.includes(password));
+  assert.equal(checks, 12);
+  assert.equal(f.calls.length, before);
+  const pending = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(pending.databaseId, previous.databaseId);
+  assert.equal(pending.url, previous.url);
+  assert.equal(pending.verificationPending, true);
+  assert.equal(pending.verificationStage, 'status');
+  assert.equal(pending.verifiedAt, undefined);
+  assert.ok(f.messages.every(message => !message.includes(password)));
+});
+
+test('verification-only rejects mixed modes before touching any installation', async t => {
+  for (const flag of ['--dry-run', '--device-login', '--reset-password']) assert.throws(() => parseArguments(['--verify-only', flag]), /cannot be combined/);
+  assert.equal(parseArguments(['--verify-only']).verifyOnly, true);
+  const f = await fixture(t);
+  await assert.rejects(installCloudflare({ verifyOnly: true, dryRun: true }, f.dependencies), /cannot be combined/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('real HTTP response interruption retries the database download and returns the preserved revision', async t => {
+  let reads = 0, logins = 0;
+  const methods = [];
+  const server = createServer(async (request, response) => {
+    methods.push(request.method);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === '/api/status') return response.end('{"configured":true}');
+    if (request.url === '/api/login') {
+      logins++;
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      assert.equal(JSON.parse(body).password, password);
+      response.setHeader('Set-Cookie', 'seo_session=real-http-test; HttpOnly; Path=/');
+      return response.end('{"authenticated":true}');
+    }
+    assert.equal(request.url, '/api/state');
+    assert.equal(request.headers.cookie, 'seo_session=real-http-test');
+    if (++reads === 1) {
+      response.write('{"state":');
+      response.flushHeaders();
+      setTimeout(() => response.destroy(), 25);
+    } else response.end('{"state":{"existingProject":true},"revision":19}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const localOrigin = `http://127.0.0.1:${server.address().port}`;
+  const url = 'https://rooyesh-1234567890abcdef12345678.personal.workers.dev';
+  // Bridge only synthetic credentials to the disposable local server; production URLs stay validated HTTPS.
+  const revision = await verifyDeployment(url, password, {
+    fetcher: (target, options) => fetch(`${localOrigin}${new URL(target).pathname}`, options),
+    sleep: async () => {}, log: () => {},
+  });
+  assert.equal(revision, 19);
+  assert.equal(logins, 1);
+  assert.equal(reads, 2);
+  assert.deepEqual(methods, ['GET', 'POST', 'GET', 'GET']);
 });

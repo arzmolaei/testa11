@@ -4,6 +4,7 @@ param(
     [ValidatePattern('^(main|[0-9a-f]{40})$')]
     [string]$SourceRef = 'main',
     [switch]$DryRun,
+    [switch]$VerifyOnly,
     [switch]$FromLocalSource
 )
 
@@ -103,6 +104,7 @@ function Get-NodeExecutable {
 }
 
 try {
+    if ($DryRun -and $VerifyOnly) { throw 'Choose either -DryRun or -VerifyOnly.' }
     if ($PSVersionTable.PSVersion -lt [Version]'5.1') { throw 'PowerShell 5.1 or newer is required.' }
     if (-not $env:LOCALAPPDATA) { throw 'The Windows LOCALAPPDATA folder could not be found.' }
     $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -111,9 +113,12 @@ try {
     if (-not $mutexTaken) { throw 'Another Rooyesh installer is already running. Close it before starting this one.' }
     $installRoot = Join-Path $env:LOCALAPPDATA 'Rooyesh'
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+    $env:ROOYESH_INSTALL_DIR = Join-Path $installRoot 'cloud-install'
+    if ($VerifyOnly -and -not (Test-Path -LiteralPath (Join-Path $env:ROOYESH_INSTALL_DIR 'state.json'))) {
+        throw 'No saved installation was found. Run the normal installer first; -VerifyOnly never creates another app.'
+    }
     $nodeExe = Get-NodeExecutable $installRoot
     $env:PATH = (Split-Path -Parent $nodeExe) + ';' + $env:PATH
-    $env:ROOYESH_INSTALL_DIR = Join-Path $installRoot 'cloud-install'
 
     if ($FromLocalSource) {
         $appRoot = $PSScriptRoot
@@ -157,15 +162,29 @@ try {
     $helper = Join-Path $appRoot 'scripts\install-cloudflare.mjs'
     if (-not (Test-Path -LiteralPath $helper)) { throw "Installer source is incomplete at $appRoot." }
     Write-Host ''
-    Write-Host 'Alireza SEO Studio - automatic Cloudflare installation' -ForegroundColor Green
-    Write-Host 'Cloudflare login approval stays in your browser. No API key is needed.'
+    if ($VerifyOnly) {
+        Write-Host 'Alireza SEO Studio - resume final verification' -ForegroundColor Green
+        Write-Host 'Your published app is kept. Only login and database read checks will run.'
+    } else {
+        Write-Host 'Alireza SEO Studio - automatic Cloudflare installation' -ForegroundColor Green
+        Write-Host 'Cloudflare login approval stays in your browser. No API key is needed.'
+    }
     Write-Host 'Keep this window open. If a step fails, run the same command again.'
     Push-Location $appRoot
     try {
-        if ($DryRun) { & $nodeExe $helper --dry-run } else { & $nodeExe $helper }
+        # Recent Node.js versions support the same HTTP(S)_PROXY settings used by Wrangler.
+        # Feature-detect the flag so existing Node.js 22.13 installations still work.
+        $proxySupported = & $nodeExe -p "process.allowedNodeEnvironmentFlags.has('--use-env-proxy')"
+        $nodeArguments = @()
+        if ($LASTEXITCODE -eq 0 -and "$proxySupported" -eq 'true') { $nodeArguments += '--use-env-proxy' }
+        $nodeArguments += $helper
+        if ($DryRun) { $nodeArguments += '--dry-run' }
+        if ($VerifyOnly) { $nodeArguments += '--verify-only' }
+        & $nodeExe @nodeArguments
         $helperExitCode = $LASTEXITCODE
     } finally { Pop-Location }
-    if ($helperExitCode -ne 0) { throw "Installation stopped (exit $helperExitCode). Your saved deployment information is retained." }
+    # A published app remains usable when this terminal's final HTTPS check times out.
+    # Create its shortcuts before reporting an unfinished verification.
     if (-not $DryRun) {
         $shortcut = Join-Path $env:ROOYESH_INSTALL_DIR 'Open-Rooyesh.url'
         $desktop = [Environment]::GetFolderPath('Desktop')
@@ -185,6 +204,7 @@ try {
             }
         }
     }
+    if ($helperExitCode -ne 0) { throw "Installation stopped (exit $helperExitCode). Your saved deployment information is retained." }
     Write-Host 'Done.' -ForegroundColor Green
     exit 0
 } catch {
