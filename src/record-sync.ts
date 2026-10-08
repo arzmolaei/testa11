@@ -53,7 +53,7 @@ async function edit(before: Record<string, unknown>, after: Record<string, unkno
 /** Navigation is a device preference. Only project data and settings are sent. */
 export async function buildChangeSet(base: Store, next: Store): Promise<ChangeSet> {
   const changes: EntityChange[] = [];
-  const settings = await edit(base.settings as unknown as Record<string, unknown>, next.settings as unknown as Record<string, unknown>, { collection: "settings", projectId: "", rowId: "settings" }, SETTINGS_FIELDS);
+  const settings = base.settings === next.settings ? null : await edit(base.settings as unknown as Record<string, unknown>, next.settings as unknown as Record<string, unknown>, { collection: "settings", projectId: "", rowId: "settings" }, SETTINGS_FIELDS);
   if (settings) changes.push(settings);
   const previous = new Map(base.projects.map((project) => [project.id, project]));
   const upcoming = new Map(next.projects.map((project) => [project.id, project]));
@@ -64,10 +64,12 @@ export async function buildChangeSet(base: Store, next: Store): Promise<ChangeSe
       changes.push({ kind: "create", collection: "projects", projectId: project.id, rowId: project.id, after: structuredClone(project) as unknown as Record<string, unknown> });
       continue;
     }
+    if (old === project) continue;
     const metadata = await edit(old as unknown as Record<string, unknown>, project as unknown as Record<string, unknown>, { collection: "projects", projectId: project.id, rowId: project.id }, PROJECT_FIELDS);
     if (metadata) changes.push(metadata);
     for (const collection of COLLECTIONS) {
       const oldRows = rows(old as unknown as Record<string, unknown>, collection), newRows = rows(project as unknown as Record<string, unknown>, collection);
+      if (oldRows === newRows) continue;
       const oldMap = new Map(oldRows.map((row) => [String(row.id), row]));
       const newIds = new Set(newRows.map((row) => String(row.id)));
       for (const row of oldRows) if (!newIds.has(String(row.id))) changes.push({ kind: "delete", collection, projectId: project.id, rowId: String(row.id), beforeHash: await recordFingerprint(row) });
@@ -75,7 +77,7 @@ export async function buildChangeSet(base: Store, next: Store): Promise<ChangeSe
         const address: Address = { collection, projectId: project.id, rowId: String(row.id) };
         const oldRow = oldMap.get(String(row.id));
         if (!oldRow) changes.push({ ...address, kind: "create", after: structuredClone(row) });
-        else { const change = await edit(oldRow, row, address); if (change) changes.push(change); }
+        else if (oldRow !== row) { const change = await edit(oldRow, row, address); if (change) changes.push(change); }
       }
     }
   }

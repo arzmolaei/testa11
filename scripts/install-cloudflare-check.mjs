@@ -97,6 +97,57 @@ async function fixture(t, settings = {}) {
 const wranglerCalls = calls => calls.filter(call => call.args[0] !== 'npm-cli-test.js');
 const hasCommand = (call, command, operation) => call.args[1] === command && (operation === undefined || call.args[2] === operation);
 
+test('update mode stops before any build or cloud command when the saved app is missing', async t => {
+  const f = await fixture(t);
+  await assert.rejects(installCloudflare({ updateOnly: true }, f.dependencies), /selected installation is missing/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.secretPrompts.length, 0);
+  await assert.rejects(readFile(path.join(f.installDir, 'state.json')), { code: 'ENOENT' });
+});
+
+test('new-install mode cannot replace an existing app and incompatible modes are rejected', async t => {
+  const f = await fixture(t);
+  await installCloudflare({ newInstall: true }, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json'), saved = await readFile(stateFile, 'utf8'), before = f.calls.length;
+  await assert.rejects(installCloudflare({ newInstall: true }, f.dependencies), /already has an installation/);
+  assert.equal(f.calls.length, before);
+  assert.equal(await readFile(stateFile, 'utf8'), saved);
+  for (const flags of [['--update', '--new-install'], ['--update', '--dry-run'], ['--new-install', '--verify-only']]) assert.throws(() => parseArguments(flags));
+  assert.equal(parseArguments(['--update']).updateOnly, true);
+  assert.equal(parseArguments(['--new-install']).newInstall, true);
+});
+
+test('update mode preserves legacy Rooyesh identities and skips client-side test suites', async t => {
+  const f = await fixture(t);
+  await installCloudflare({}, f.dependencies);
+  const stateFile = path.join(f.installDir, 'state.json'), saved = JSON.parse(await readFile(stateFile, 'utf8'));
+  saved.workerName = saved.workerName.replace('roshdimo-', 'rooyesh-');
+  saved.databaseName = `${saved.workerName}-db`;
+  saved.url = saved.url.replace('roshdimo-', 'rooyesh-');
+  f.cloud.databases[0].name = saved.databaseName;
+  await writeFile(stateFile, JSON.stringify(saved));
+  const before = f.calls.length, result = await installCloudflare({ updateOnly: true }, f.dependencies);
+  assert.equal(result.url, saved.url);
+  assert.equal(result.databaseId, saved.databaseId);
+  assert.equal(f.cloud.databases.length, 1);
+  assert.equal(f.cloud.secrets.length, 1);
+  assert.ok(!f.calls.slice(before).some(call => hasCommand(call, 'd1', 'create') || hasCommand(call, 'secret', 'put') || call.args[1] === 'test'));
+  assert.equal(JSON.parse(await readFile(stateFile, 'utf8')).workerName, saved.workerName);
+});
+
+test('independent installation folders keep existing saved identity and get different Worker and database names', async t => {
+  const first = await fixture(t), second = await fixture(t);
+  const original = await installCloudflare({ newInstall: true }, first.dependencies);
+  const filename = path.join(first.installDir, 'state.json'), snapshot = await readFile(filename, 'utf8');
+  second.dependencies.randomBytes = () => Buffer.from('abcdef1234567890abcdef12', 'hex');
+  const fresh = await installCloudflare({ newInstall: true }, second.dependencies);
+  assert.notEqual(original.url, fresh.url);
+  assert.notEqual(first.cloud.databases[0].name, second.cloud.databases[0].name);
+  assert.equal(await readFile(filename, 'utf8'), snapshot);
+  assert.equal(first.cloud.secrets.length, 1);
+  assert.equal(second.cloud.secrets.length, 1);
+});
+
 test('fresh install scopes account, saves stable IDs, sends secret only through stdin, and verifies read only', async t => {
   const f = await fixture(t);
   const result = await installCloudflare({}, f.dependencies);

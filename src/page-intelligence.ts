@@ -24,6 +24,7 @@ export type PagePlanSelection = {
   pageType?: string;
   targetPageId?: string;
   excluded?: boolean;
+  priority?: string;
 };
 
 type Analysis = {
@@ -340,7 +341,7 @@ export function buildPagePlan(
       if (nextPages.length >= 2000) { skipped += eligible.length; continue; }
       page = {
         id: uid(), pageId: nextDisplayId("page"), target: label, pkw: primary,
-        supporting: "", cluster: candidate.label, pageType, existing: "New", action: "Create New", priority: "P2", status: "Mapping",
+        supporting: "", cluster: candidate.label, pageType, existing: "New", action: "Create New", priority: ["P0", "P1", "P2", "P3"].includes(selection.priority || "") ? selection.priority : "P2", status: "Mapping",
         serpCheck: "Not Checked", intentConfirmed: "Unknown", samePageDecision: "Needs Review", planningCandidateId: candidate.id,
         pageBrief: boundedText(`هدف پیشنهادی: ${candidate.intent}\nکلمهٔ اصلی: ${primary}\nپیش از اجرا، نیت و نوع صفحه را در نتایج جست‌وجو بررسی کنید.`),
       };
@@ -380,6 +381,7 @@ export function buildPagePlan(
         id: uid(), contentId: nextDisplayId("content"), targetPage: page.id,
         pkw: text(page.pkw) || primary, topic: text(page.target) || label, contentType: contentType(effectiveType), cluster: text(page.cluster) || candidate.label,
         briefStatus: "Research", writingStatus: "Research", h2Ideas: boundedText(brief.h2Ideas), faq: boundedText(brief.faq),
+        priority: text(page.priority) || "P2",
         entities: boundedText([...new Set(plannedRows.map((row) => text(row.keyword)))].join("\n")),
         cta: boundedText(brief.cta),
         sources: "بریف اولیه از اطلاعات همین پروژه؛ منابع و شواهد باید در مرحلهٔ تحقیق اضافه شوند.",

@@ -27,7 +27,7 @@ function applyRootTheme(theme: Theme) {
   document.documentElement.dataset.theme = theme;
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#0f1716" : "#0a8479");
+    ?.setAttribute("content", theme === "dark" ? "#111318" : "#0a8479");
 }
 
 /** Theme preferences are independent of project data and work without network access. */

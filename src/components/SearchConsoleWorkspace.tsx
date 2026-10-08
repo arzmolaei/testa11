@@ -23,7 +23,7 @@ const kindLabel = { "low-ctr": "نرخ کلیک", "near-first-page": "فرصت �
 
 function exportDataset(dataset: SearchConsoleDataset) {
   const url = URL.createObjectURL(new Blob([searchConsoleDatasetCsv(dataset)], { type: "text/csv;charset=utf-8" }));
-  const anchor = document.createElement("a"); anchor.href = url; anchor.download = `Alireza-SEO-Search-Console-${jalaliFileDate()}.csv`;
+  const anchor = document.createElement("a"); anchor.href = url; anchor.download = `Roshdimo-Search-Console-${jalaliFileDate()}.csv`;
   document.body.appendChild(anchor); anchor.click(); anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

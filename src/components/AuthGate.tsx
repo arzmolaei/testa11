@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, Check, Eye, EyeOff, KeyRound, Leaf, LockKeyhole, Moon, RefreshCw, ShieldCheck, Sparkles, Sun, UsersRound, WifiOff } from "lucide-react";
+import { ArrowLeft, Check, Eye, EyeOff, KeyRound, LockKeyhole, Moon, RefreshCw, ShieldCheck, Sparkles, Sun, UsersRound, WifiOff } from "lucide-react";
 import {
   AUTH_EXPIRED_EVENT, AUTH_LOGOUT_EVENT, AuthApiError, authRequest,
   forgetRememberedSession, PENDING_LOGOUT_KEY, readRememberedSession,
@@ -8,6 +8,7 @@ import {
 } from "../auth";
 import "./AuthGate.css";
 import { useTheme } from "../theme";
+import { BrandMark } from "./BrandMark";
 
 const LOCAL_SESSION: AuthSession = {
   mode: "local",
@@ -270,8 +271,8 @@ export function AuthGate({ children }: {
   return <main className="auth-gate" dir="rtl">
     <button className="auth-theme-toggle" type="button" onClick={toggleTheme} aria-label={theme === "dark" ? "فعال‌کردن حالت روشن" : "فعال‌کردن حالت تاریک"} title={theme === "dark" ? "حالت روشن" : "حالت تاریک"}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button>
     <div className="auth-layout">
-      <section className="auth-intro" aria-label="استودیوی سئو">
-        <div className="auth-brand"><span className="auth-brand-icon"><Leaf size={27} /></span><span>استودیوی سئو<small>علیرضا ملائی</small></span></div>
+      <section className="auth-intro" aria-label="رشدیمو">
+        <div className="auth-brand"><span className="auth-brand-icon"><BrandMark size={51} /></span><span>رشدیمو<small lang="en" dir="ltr">ROSHDIMO</small></span></div>
         <span className="auth-eyebrow"><Sparkles size={14} /> فضای اختصاصی کار شما</span>
         <h1>همه‌چیز برای<br />قدم بعدیِ سئو.</h1>
         <p>از پژوهش کلمات تا برنامه‌ریزی محتوا و بررسی نتیجه؛ پروژه‌ها و تیم شما در یک فضای منظم و امن.</p>
@@ -312,13 +313,13 @@ export function AuthGate({ children }: {
             </div>
             <label className="auth-remember"><input type="checkbox" checked={offlineEnabled} onChange={event => setOfflineEnabled(event.target.checked)} disabled={busy} /><span>این دستگاه شخصی است؛ دسترسی آفلاین فعال شود<small>دسترسی روی همین مرورگر، تا پایان اعتبار ورود. در دستگاه مشترک فعال نکنید.</small></span></label>
             {error && <div className="auth-error" role="alert">{error}</div>}
-            <button className="auth-submit" type="submit" disabled={busy}>{busy ? <RefreshCw className="auth-spin" size={17} /> : <ArrowLeft size={17} />} {busy ? "در حال ورود…" : "ورود به استودیو"}</button>
+            <button className="auth-submit" type="submit" disabled={busy}>{busy ? <RefreshCw className="auth-spin" size={17} /> : <ArrowLeft size={17} />} {busy ? "در حال ورود…" : "ورود به رشدیمو"}</button>
           </form>
           <p className="auth-owner-hint"><KeyRound size={13} /> نام کاربری اولیه مالک: <b dir="ltr">alireza</b></p>
         </>}
         <div className="auth-footer"><ShieldCheck size={14} /> اطلاعات پروژه‌ها فقط پس از ورود نمایش داده می‌شوند.</div>
       </section>
     </div>
-    <p className="auth-page-footer">استودیوی سئوی علیرضا ملائی · فضای کاری اختصاصی شما و تیمتان</p>
+    <p className="auth-page-footer">رشدیمو · فضای کار شما و تیمتان</p>
   </main>;
 }

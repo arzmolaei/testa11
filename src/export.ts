@@ -395,7 +395,7 @@ function writeStart(
   for (let row = 1; row <= 42; row++)
     for (let col = 1; col <= 8; col++)
       paint(sheet.getCell(row, col), COLORS.paper);
-  band(sheet, 1, 1, 8, "استودیوی سئو • علیرضا ملائی", COLORS.teal);
+  band(sheet, 1, 1, 8, "رشدیمو | Roshdimo", COLORS.teal);
   sheet.getRow(1).height = 52;
   band(
     sheet,
@@ -987,7 +987,7 @@ export async function buildWorkbook(
   settings: Settings,
 ): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "Alireza SEO Studio";
+  workbook.creator = "Roshdimo";
   workbook.title = `SEO Project • ${project.name}`;
   workbook.subject = "Reusable keyword-to-results SEO workspace";
   workbook.description =

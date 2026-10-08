@@ -12,16 +12,18 @@ export const LOGIN_SCOPES = ['account:read', 'user:read', 'workers:write', 'work
 const ZERO_DB = '00000000-0000-0000-0000-000000000000';
 const accountPattern = /^[a-f0-9]{32}$/i;
 const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const namePattern = /^rooyesh-[a-f0-9]{24}(?:-db)?$/;
+const namePattern = /^(?:rooyesh|roshdimo)-[a-f0-9]{24}(?:-db)?$/;
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export function parseArguments(args) {
   const flags = new Set(args);
-  const known = ['--dry-run', '--device-login', '--verify-only', '--reset-password', '--help'];
+  const known = ['--dry-run', '--device-login', '--verify-only', '--update', '--new-install', '--reset-password', '--help'];
   for (const flag of flags) if (!known.includes(flag)) throw new Error(`Unknown option: ${flag}`);
   if (flags.has('--dry-run') && flags.has('--reset-password')) throw new Error('--dry-run cannot reset a cloud password.');
-  if (flags.has('--verify-only') && ['--dry-run', '--device-login', '--reset-password'].some(flag => flags.has(flag))) throw new Error('--verify-only cannot be combined with publishing or password options.');
-  return { dryRun: flags.has('--dry-run'), deviceLogin: flags.has('--device-login'), verifyOnly: flags.has('--verify-only'), resetPassword: flags.has('--reset-password'), help: flags.has('--help') };
+  if (flags.has('--verify-only') && ['--dry-run', '--device-login', '--reset-password', '--update', '--new-install'].some(flag => flags.has(flag))) throw new Error('--verify-only cannot be combined with publishing or password options.');
+  if (flags.has('--update') && flags.has('--new-install')) throw new Error('Choose --update or --new-install, not both.');
+  if (flags.has('--dry-run') && (flags.has('--update') || flags.has('--new-install'))) throw new Error('--dry-run cannot select a cloud installation mode.');
+  return { dryRun: flags.has('--dry-run'), deviceLogin: flags.has('--device-login'), verifyOnly: flags.has('--verify-only'), updateOnly: flags.has('--update'), newInstall: flags.has('--new-install'), resetPassword: flags.has('--reset-password'), help: flags.has('--help') };
 }
 
 /** Remove JSONC comments without changing // inside URLs or escaped strings. */
@@ -175,7 +177,7 @@ async function atomicJSON(filename, value) {
 }
 
 function validateState(state) {
-  if (state.schema !== 1 || !namePattern.test(state.workerName) || state.databaseName !== `${state.workerName}-db` || !/^[a-f0-9]{24}$/.test(state.installationId) || state.workerName !== `rooyesh-${state.installationId}`) throw new Error('The saved installation identity is invalid. Keep it for recovery; do not delete it.');
+  if (state.schema !== 1 || !namePattern.test(state.workerName) || state.databaseName !== `${state.workerName}-db` || !/^[a-f0-9]{24}$/.test(state.installationId) || ![`rooyesh-${state.installationId}`, `roshdimo-${state.installationId}`].includes(state.workerName)) throw new Error('The saved installation identity is invalid. Keep it for recovery; do not delete it.');
   if (state.accountId !== undefined && !accountPattern.test(state.accountId)) throw new Error('The saved account ID is invalid.');
   if (state.databaseId !== undefined && (!uuidPattern.test(state.databaseId) || state.databaseId === ZERO_DB)) throw new Error('The saved database ID is invalid.');
   if (state.url !== undefined) validateWorkerURL(state.url, state.workerName);
@@ -284,7 +286,8 @@ export async function verifyDeployment(url, password, { fetcher = fetch, sleep =
 
 export async function installCloudflare(options = {}, dependencies = {}) {
   if (options.resetPassword) throw new Error('Change account passwords in the app Account and Team settings. The installer never resets an existing account password.');
-  if (options.verifyOnly && (options.dryRun || options.deviceLogin)) throw new Error('--verify-only cannot be combined with publishing options.');
+  if (options.verifyOnly && (options.dryRun || options.deviceLogin || options.updateOnly || options.newInstall)) throw new Error('--verify-only cannot be combined with publishing options.');
+  if (options.updateOnly && options.newInstall || options.dryRun && (options.updateOnly || options.newInstall)) throw new Error('Choose one installation mode.');
   const root = dependencies.root || sourceRoot;
   const installDir = path.resolve(dependencies.installDir || process.env.ROOYESH_INSTALL_DIR || path.join(root, '.rooyesh-install'));
   const runner = dependencies.runner || commandRunner();
@@ -317,7 +320,7 @@ export async function installCloudflare(options = {}, dependencies = {}) {
   }
   let password;
   try {
-    log('Alireza SEO Studio installer');
+    log('Roshdimo installer');
     const save = () => atomicJSON(stateFile, state);
     const verifyPublished = async () => {
       const url = validateWorkerURL(state.url, state.workerName);
@@ -363,10 +366,20 @@ export async function installCloudflare(options = {}, dependencies = {}) {
       if (!validExistingPassword(password)) throw new Error('Enter the current alireza account password (up to 1024 characters).');
       return await verifyPublished();
     }
+    // Check the selected mode before downloads/builds or any cloud operation.
+    if (options.updateOnly || options.newInstall) {
+      let existing;
+      try { existing = await readFile(stateFile, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (options.updateOnly && existing === undefined) throw new Error('The selected installation is missing. Updating stopped; no new app or database was created.');
+      if (options.newInstall && existing !== undefined) throw new Error('This folder already has an installation. Choose Update to preserve it, or select a separate folder for a new app.');
+      if (existing !== undefined) validateState(JSON.parse(existing));
+    }
     log(options.dryRun ? 'Local checks only: no Cloudflare login, resources, or publishing.' : 'The installer will publish your private SEO app to your Cloudflare account.');
     await runner({ command: process.execPath, args: [npmCLI, 'ci', '--no-audit', '--no-fund'], cwd: root, env, label: 'Dependency installation' });
     await runner({ command: process.execPath, args: [npmCLI, 'run', 'build'], cwd: root, env, label: 'App build' });
-    await runner({ command: process.execPath, args: [npmCLI, 'test'], cwd: root, env, label: 'App tests' });
+    // Released builds are tested during development; keep customer updates light.
+    if (options.dryRun) await runner({ command: process.execPath, args: [npmCLI, 'test'], cwd: root, env, label: 'App tests' });
     // JSONC paths always refer to the current release, while identity remains stable across upgrades.
     const base = parseJSONC(await readFile(path.join(root, 'wrangler.jsonc'), 'utf8'));
     const generatedConfig = identity => ({
@@ -392,8 +405,9 @@ export async function installCloudflare(options = {}, dependencies = {}) {
     try { state = validateState(JSON.parse(await readFile(stateFile, 'utf8'))); }
     catch (error) {
       if (error.code !== 'ENOENT') throw new Error(`Saved installation could not be read: ${error.message}. Keep ${stateFile} for recovery.`);
+      if (options.updateOnly) throw new Error('The saved installation disappeared. Updating stopped without creating another app.');
       const installationId = (dependencies.randomBytes || randomBytes)(12).toString('hex');
-      state = { schema: 1, installationId, workerName: `rooyesh-${installationId}`, databaseName: `rooyesh-${installationId}-db`, createdAt: new Date().toISOString() };
+      state = { schema: 1, installationId, workerName: `roshdimo-${installationId}`, databaseName: `roshdimo-${installationId}-db`, createdAt: new Date().toISOString() };
       await atomicJSON(stateFile, state);
     }
     await atomicJSON(configFile, generatedConfig(state));
@@ -510,7 +524,7 @@ if (import.meta.url === pathToFileURL(path.resolve(process.argv[1] || '')).href)
     const [major, minor] = process.versions.node.split('.').map(Number);
     if (major < 22 || (major === 22 && minor < 13)) throw new Error('Node.js 22.13 or newer is required. Run Install-Rooyesh.cmd.');
     const options = parseArguments(process.argv.slice(2));
-    if (options.help) console.log('Usage: node scripts/install-cloudflare.mjs [--dry-run] [--device-login] [--verify-only]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nUse --verify-only after a published app failed final verification: no build or cloud resource changes.\nRerun the normal installer for updates; resources and existing projects are preserved.\nAccount passwords are changed inside the app, never by updating.');
+    if (options.help) console.log('Roshdimo installation\nUsage: node scripts/install-cloudflare.mjs [--update | --new-install | --verify-only | --dry-run] [--device-login]\nBrowser OAuth approves Workers/D1 access. The app password is entered hidden.\nUse --update with a saved installation to preserve its address, database, accounts and projects.\nUse --new-install with a separate installation directory for an independent app.\nUse --verify-only after a published app failed final verification: no build or cloud resource changes.\nAccount passwords are changed inside the app, never by updating.');
     else await installCloudflare(options);
   } catch (error) {
     console.error(`\nInstallation stopped: ${error.message}`);

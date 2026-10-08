@@ -14,7 +14,7 @@
 .page-connections summary { cursor:pointer; color:var(--muted); }
 .page-connections .connection-list { display:grid; gap:6px; max-height:220px; overflow:auto; margin-top:10px; }
 .project-modal { max-height:calc(100dvh - 32px); overflow-y:auto; }
-html[data-theme="dark"] .workspace-modes, html[data-theme="dark"] .page-connections { background:#192925; border-color:#32473f; }
-html[data-theme="dark"] .workspace-modes button.active { background:#25473d; color:#9be0c2; }
-html[data-theme="dark"] .page-connections button { border-color:#32473f; color:#9be0c2; }
+html[data-theme="dark"] .workspace-modes, html[data-theme="dark"] .page-connections { background:#22252d; border-color:#3f424a; }
+html[data-theme="dark"] .workspace-modes button.active { background:#3c3f47; color:#cccfd7; }
+html[data-theme="dark"] .page-connections button { border-color:#3f424a; color:#cccfd7; }
 @media(max-width:640px) { .workspace-modes { width:100%; } .workspace-modes button { flex:1 1 auto; font-size:11px; padding:9px 8px; } }

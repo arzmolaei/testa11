@@ -2013,3 +2013,8 @@ body {
 }
 .workspace-access{border:0;padding:0;margin:0;min-width:0;width:100%}
 @media(max-width:700px){.sidebar{visibility:hidden;pointer-events:none}.sidebar.is-open{visibility:visible;pointer-events:auto}}
+
+.brand-mark { display:block; max-width:100%; height:auto; flex-shrink:0; }
+.brand-icon:has(.brand-mark), .auth-brand-icon:has(.brand-mark) { background:transparent; transform:none; box-shadow:none; }
+.auth-brand-icon .brand-mark { transform:none; }
+.brand-personal small, .auth-brand small[lang="en"] { letter-spacing:2px; font-size:9px; line-height:1.9; }

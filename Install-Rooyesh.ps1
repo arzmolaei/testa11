@@ -103,6 +103,45 @@ function Get-NodeExecutable {
     return $runtimeExe
 }
 
+function Get-SavedInstallations {
+    param([string]$InstallRoot)
+    $folders = @((Join-Path $InstallRoot 'cloud-install'))
+    $profiles = Join-Path $InstallRoot 'installations'
+    if (Test-Path -LiteralPath $profiles) {
+        foreach ($directory in Get-ChildItem -LiteralPath $profiles -Directory) {
+            if ($directory.Name -match '^[a-f0-9]{32}$') { $folders += Join-Path $directory.FullName 'cloud-install' }
+        }
+    }
+    foreach ($folder in $folders) {
+        $stateFile = Join-Path $folder 'state.json'
+        if (-not (Test-Path -LiteralPath $stateFile)) { continue }
+        $label = if ($folder -eq (Join-Path $InstallRoot 'cloud-install')) { 'Roshdimo - original installation' } else { 'Roshdimo - ' + (Split-Path -Leaf (Split-Path -Parent $folder)).Substring(0, 8) }
+        try {
+            $saved = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+            if ([string]$saved.url -match '^https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/?$') { $label += ' | ' + [string]$saved.url }
+            else { $label += ' | installation in progress' }
+        } catch { $label += ' | saved information needs recovery' }
+        [PSCustomObject]@{ Folder = $folder; Label = $label }
+    }
+}
+
+function Select-SavedInstallation {
+    param([object[]]$Installations)
+    if ($Installations.Count -eq 1) {
+        Write-Host $Installations[0].Label -ForegroundColor Cyan
+        return $Installations[0].Folder
+    }
+    Write-Host 'Choose the app you want to update or check:' -ForegroundColor Cyan
+    for ($i = 0; $i -lt $Installations.Count; $i++) { Write-Host ("  {0}. {1}" -f ($i + 1), $Installations[$i].Label) }
+    for (;;) {
+        $answer = Read-Host 'App number (0 cancels)'
+        if ($answer -eq '0') { throw 'Installation cancelled. Existing apps are kept.' }
+        $chosen = 0
+        if ($answer -match '^[1-9][0-9]*$' -and [int]::TryParse($answer, [ref]$chosen) -and $chosen -le $Installations.Count) { return $Installations[$chosen - 1].Folder }
+        Write-Host 'Enter one of the app numbers shown above.' -ForegroundColor Yellow
+    }
+}
+
 try {
     if ($DryRun -and $VerifyOnly) { throw 'Choose either -DryRun or -VerifyOnly.' }
     if ($PSVersionTable.PSVersion -lt [Version]'5.1') { throw 'PowerShell 5.1 or newer is required.' }
@@ -113,9 +152,40 @@ try {
     if (-not $mutexTaken) { throw 'Another Rooyesh installer is already running. Close it before starting this one.' }
     $installRoot = Join-Path $env:LOCALAPPDATA 'Rooyesh'
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-    $env:ROOYESH_INSTALL_DIR = Join-Path $installRoot 'cloud-install'
-    if ($VerifyOnly -and -not (Test-Path -LiteralPath (Join-Path $env:ROOYESH_INSTALL_DIR 'state.json'))) {
+    $savedInstallations = @(Get-SavedInstallations $installRoot)
+    $installationMode = $null
+    if ($VerifyOnly -and -not $savedInstallations.Count) {
         throw 'No saved installation was found. Run the normal installer first; -VerifyOnly never creates another app.'
+    }
+    if ($DryRun) {
+        $env:ROOYESH_INSTALL_DIR = Join-Path $installRoot 'cloud-install'
+    } elseif ($VerifyOnly) {
+        $env:ROOYESH_INSTALL_DIR = Select-SavedInstallation $savedInstallations
+    } else {
+        Write-Host ''
+        Write-Host 'Roshdimo - choose what to do' -ForegroundColor Cyan
+        if ($savedInstallations.Count) {
+            Write-Host '  1. Update an existing app (keeps its address, projects and passwords)'
+            Write-Host '  2. Install a separate new app (keeps every existing app)'
+            Write-Host '  3. Resume login and database checks only'
+            Write-Host '  0. Cancel'
+            do { $answer = Read-Host 'Choose 1, 2 or 3 (Enter = Update)' } while ($answer -notin @('', '0', '1', '2', '3'))
+            if ($answer -eq '') { $answer = '1' }
+        } else {
+            Write-Host '  1. Install Roshdimo'
+            Write-Host '  0. Cancel'
+            do { $answer = Read-Host 'Choose 1 (Enter = Install)' } while ($answer -notin @('', '0', '1'))
+            if ($answer -eq '') { $answer = '1' }
+        }
+        if ($answer -eq '0') { throw 'Installation cancelled. Existing apps are kept.' }
+        if ($savedInstallations.Count -and $answer -ne '2') {
+            $env:ROOYESH_INSTALL_DIR = Select-SavedInstallation $savedInstallations
+            if ($answer -eq '3') { $VerifyOnly = $true } else { $installationMode = '--update' }
+        } else {
+            $env:ROOYESH_INSTALL_DIR = if ($savedInstallations.Count) { Join-Path (Join-Path (Join-Path $installRoot 'installations') ([Guid]::NewGuid().ToString('N'))) 'cloud-install' } else { Join-Path $installRoot 'cloud-install' }
+            $installationMode = '--new-install'
+            Write-Host 'A new app has its own Worker, database and app password. Existing apps are preserved.'
+        }
     }
     $nodeExe = Get-NodeExecutable $installRoot
     $env:PATH = (Split-Path -Parent $nodeExe) + ';' + $env:PATH
@@ -131,7 +201,7 @@ try {
             if ($SourceRef -ne 'main' -and (Test-Path -LiteralPath $appRoot)) {
                 throw "An unfinished or unrelated folder exists at $appRoot. Rename that folder and run again."
             }
-            Write-Host 'Downloading Alireza SEO Studio from GitHub...' -ForegroundColor Cyan
+            Write-Host 'Downloading Roshdimo from GitHub...' -ForegroundColor Cyan
             $stage = Join-Path $installRoot ('source-stage-' + [Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $stage | Out-Null
             try {
@@ -163,10 +233,10 @@ try {
     if (-not (Test-Path -LiteralPath $helper)) { throw "Installer source is incomplete at $appRoot." }
     Write-Host ''
     if ($VerifyOnly) {
-        Write-Host 'Alireza SEO Studio - resume final verification' -ForegroundColor Green
+        Write-Host 'Roshdimo - resume final verification' -ForegroundColor Green
         Write-Host 'Your published app is kept. Only login and database read checks will run.'
     } else {
-        Write-Host 'Alireza SEO Studio - automatic Cloudflare installation' -ForegroundColor Green
+        Write-Host 'Roshdimo - automatic Cloudflare installation' -ForegroundColor Green
         Write-Host 'Cloudflare login approval stays in your browser. No API key is needed.'
     }
     Write-Host 'Keep this window open. If a step fails, run the same command again.'
@@ -180,6 +250,7 @@ try {
         $nodeArguments += $helper
         if ($DryRun) { $nodeArguments += '--dry-run' }
         if ($VerifyOnly) { $nodeArguments += '--verify-only' }
+        if ($installationMode) { $nodeArguments += $installationMode }
         & $nodeExe @nodeArguments
         $helperExitCode = $LASTEXITCODE
     } finally { Pop-Location }
@@ -189,14 +260,16 @@ try {
         $shortcut = Join-Path $env:ROOYESH_INSTALL_DIR 'Open-Rooyesh.url'
         $desktop = [Environment]::GetFolderPath('Desktop')
         if ($desktop -and (Test-Path -LiteralPath $shortcut)) {
-            $desktopShortcut = Join-Path $desktop 'Alireza SEO Studio.url'
+            $profileName = if ($env:ROOYESH_INSTALL_DIR -eq (Join-Path $installRoot 'cloud-install')) { 'Original' } else { (Split-Path -Leaf (Split-Path -Parent $env:ROOYESH_INSTALL_DIR)).Substring(0, 8) }
+            $shortcutName = if ($savedInstallations.Count -gt 1 -or $installationMode -eq '--new-install' -and $savedInstallations.Count) { 'Roshdimo ' + $profileName } else { 'Roshdimo' }
+            $desktopShortcut = Join-Path $desktop ($shortcutName + '.url')
             if (-not (Test-Path -LiteralPath $desktopShortcut)) {
                 try { Copy-Item -LiteralPath $shortcut -Destination $desktopShortcut } catch {
                     Write-Host 'The desktop shortcut could not be created. The app address is printed above.' -ForegroundColor Yellow
                 }
             }
             $updater = Join-Path $appRoot 'Update-Alireza-SEO.cmd'
-            $desktopUpdater = Join-Path $desktop 'Update Alireza SEO Studio.cmd'
+            $desktopUpdater = Join-Path $desktop 'Update Roshdimo.cmd'
             if ((Test-Path -LiteralPath $updater) -and -not (Test-Path -LiteralPath $desktopUpdater)) {
                 try { Copy-Item -LiteralPath $updater -Destination $desktopUpdater } catch {
                     Write-Host 'The update shortcut could not be created. Run Update-Alireza-SEO.cmd from the app folder when needed.' -ForegroundColor Yellow

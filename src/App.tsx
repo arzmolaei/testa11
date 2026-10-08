@@ -14,6 +14,7 @@ import {
   FolderPlus,
   Globe2,
   Home,
+  History,
   Layers3,
   Leaf,
   LogOut,
@@ -21,6 +22,7 @@ import {
   Moon,
   Plus,
   RefreshCw,
+  Redo2,
   Search,
   Settings2,
   ShieldCheck,
@@ -30,6 +32,7 @@ import {
   Target,
   TrendingUp,
   Upload,
+  Undo2,
   WifiOff,
   X,
 } from "lucide-react";
@@ -51,6 +54,9 @@ import {
 } from "./storage";
 import type { Stored } from "./storage";
 import { KeywordWorkspace } from "./components/KeywordWorkspace";
+import { BrandMark } from "./components/BrandMark";
+import { useWorkspaceHistory } from "./use-workspace-history";
+import { WorkspaceHistory } from "./components/WorkspaceHistory";
 import { BulkEditWorkspace } from "./components/BulkEditWorkspace";
 import { AuthGate } from "./components/AuthGate";
 import { TeamSettings } from "./components/TeamSettings";
@@ -184,6 +190,9 @@ function localNavigation(state: Store, activeProjectId: string): Store {
 function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActions }) {
   const { theme, toggleTheme } = useTheme();
   const viewer = session.user.role === "viewer";
+  const history = useWorkspaceHistory(session.user.id);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyActing = useRef(false);
   const [store, setStore] = useState<Store | null>(null);
   const [view, setView] = useState<View>("start");
   const [keywordMode, setKeywordMode] = useState("table");
@@ -574,7 +583,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     return () => clearInterval(timer);
   }, [online, cloud.active]);
   const mutate = useCallback(
-    (fn: (s: Store) => Store) => {
+    (fn: (s: Store) => Store, recordHistory = true) => {
+      if (historyActing.current && recordHistory) { notify("بازگشت تغییرات در حال انجام است؛ چند لحظه صبر کنید."); return false; }
       if (transferInProgress.current) {
         notify("انتقال داده در حال انجام است؛ چند لحظه صبر کنید.");
         return false;
@@ -603,10 +613,40 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
         }
         latest.current = next;
         setStore(next);
+        if (recordHistory) history.capture(s, next);
         return true;
     },
-    [readOnly, viewer, notify],
+    [readOnly, viewer, notify, history.capture],
   );
+  const replayWorkspace = useCallback(async (direction: "undo" | "redo", count = 1) => {
+    if (historyActing.current || history.busy || transferInProgress.current || readOnly || viewer) return;
+    if (!(direction === "undo" ? history.past.length : history.future.length)) return;
+    if (hasDraft()) { notify("ابتدا تغییرات ویرایشگر را ثبت کنید؛ برای پیش‌نویس دستیار از دکمهٔ بازگشت همان بخش استفاده کنید."); return; }
+    const current = latest.current;
+    if (!current) return;
+    historyActing.current = true;
+    setWorkspaceBusy(true);
+    try {
+      const completed = await history.perform(direction, current, next => {
+        if (latest.current !== current) throw new Error("اطلاعات در حین بررسی تغییر کرد؛ دوباره بازگشت را امتحان کنید. هیچ داده‌ای جایگزین نشد.");
+        return mutate(() => next, false);
+      }, count);
+      if (completed) notify(direction === "undo" ? "تغییرات برگشتند؛ با انجام دوباره قابل بازیابی‌اند." : "تغییر دوباره انجام شد.");
+    } catch (error) { notify((error as Error).message); }
+    finally { historyActing.current = false; setWorkspaceBusy(false); }
+  }, [history.perform, history.busy, history.past.length, history.future.length, mutate, readOnly, viewer, notify]);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input,textarea,select,[contenteditable="true"],[role="textbox"]') || document.querySelector('dialog[open], [role="dialog"]')) return;
+      const direction = event.key.toLowerCase() === "z" ? event.shiftKey ? "redo" : "undo" : event.key.toLowerCase() === "y" ? "redo" : null;
+      if (!direction) return;
+      event.preventDefault(); void replayWorkspace(direction);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [replayWorkspace]);
   const canLeave = () => !hasDraft() || confirm("تغییرات ویرایشگر هنوز ذخیره نشده‌اند. از آن‌ها صرف‌نظر شود؟");
   const navigate = (v: View, rowId?: string) => {
     if ((v !== view || rowId) && !canLeave()) return;
@@ -627,9 +667,11 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
   };
 
   const replaceStore = async (incoming: Store) => {
+    if (historyActing.current) throw new Error("بازگشت تغییرات در حال انجام است؛ چند لحظه صبر کنید.");
     if (viewer) throw new Error("حساب شما فقط اجازهٔ مشاهده دارد.");
     if (transferInProgress.current) throw new Error("انتقال دیگری در حال انجام است؛ پس از پایان دوباره تلاش کنید.");
     const next = validateStore(incoming);
+    const historyBefore = latest.current;
     if (readOnly && !ownsTab.current)
       throw new Error(
         "این تب فقط برای مشاهده است؛ بازیابی از تب فعال انجام می‌شود.",
@@ -660,6 +702,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
       forceBackup.current = false;
       setSaveStatus("saved");
       setStore(next);
+      if (historyBefore) history.capture(historyBefore, next, "بازیابی نسخهٔ فضای کار");
       if (recovering) {
         setReadOnly(false);
         forgetCloudLink();
@@ -682,6 +725,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     }
   };
   const transferCloud = async (direction: "pull" | "push") => {
+    if (historyActing.current) throw new Error("بازگشت تغییرات در حال انجام است؛ چند لحظه صبر کنید.");
     if (viewer && direction === "push") throw new Error("حساب شما فقط اجازهٔ مشاهده دارد.");
     if (readOnly)
       throw new Error(
@@ -726,13 +770,14 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
           )
         )
           { cancelled = true; return; }
-        downloadJson(snapshot, "Alireza-SEO-local-before-cloud-" + jalaliFileDate() + ".json");
+        downloadJson(snapshot, "Roshdimo-local-before-cloud-" + jalaliFileDate() + ".json");
         const saved = await saveLocal(next, localRevision.current, true);
         localRevision.current = saved.revision;
         if (epoch !== cloudEpoch.current) return;
         latest.current = next;
         unsaved.current = false;
         setStore(next);
+        history.capture(snapshot, next, "دریافت نسخهٔ ابری");
         cloudRef.current = {
           configured: true,
           authenticated: true,
@@ -749,7 +794,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
           )
         )
           { cancelled = true; return; }
-        if (r.state) downloadJson(r.state, "Alireza-SEO-cloud-before-replace-" + jalaliFileDate() + ".json");
+        if (r.state) downloadJson(r.state, "Roshdimo-cloud-before-replace-" + jalaliFileDate() + ".json");
         const saved = await api(
           "state",
           { state: snapshot, revision: r.revision },
@@ -822,7 +867,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
       }
       downloadJson(
         value,
-        "Alireza-SEO-backup-" + jalaliFileDate() + ".json",
+        "Roshdimo-backup-" + jalaliFileDate() + ".json",
       );
       notify("پشتیبان همه پروژه‌ها دانلود شد.");
     }
@@ -830,10 +875,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
   if (!store)
     return (
       <div className="loading-screen">
-        <div className="brand-icon">
-          <Leaf />
-        </div>
-        <h2>استودیوی سئوی علیرضا ملائی</h2>
+        <BrandMark size={52} />
+        <h2>رشدیمو</h2>
         <p>فضای کاری شما در حال آماده شدن است…</p>
       </div>
     );
@@ -884,6 +927,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     try {
       flushLocalPending.current?.();
       await saving.current;
+      await history.flush();
       if (unsaved.current) throw new Error("آخرین تغییرات ذخیره نشدند؛ پیش از خروج پشتیبان بگیرید.");
       cloudEpoch.current++;
       cloudPending.current = false;
@@ -897,6 +941,7 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     try {
       flushLocalPending.current?.();
       await saving.current;
+      await history.flush();
       if (unsaved.current) throw new Error("آخرین تغییرات ذخیره نشدند؛ پیش از به‌روزرسانی پشتیبان بگیرید.");
       const registration = await navigator.serviceWorker.getRegistration();
       if (!registration?.waiting) { setUpdateReady(false); return; }
@@ -916,10 +961,10 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
           }}
         >
           <span className="brand-icon">
-            <Leaf size={25} />
+            <BrandMark />
           </span>
           <span>
-            استودیوی سئو<small>علیرضا ملائی</small>
+            رشدیمو<small lang="en" dir="ltr">ROSHDIMO</small>
           </span>
         </a>
         <div className="sidebar-label">پروژه فعال</div>
@@ -1016,6 +1061,11 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
             <strong>{NAV.find((n) => n.key === view)?.label}</strong>
           </div>
           <div className="topbar-actions">
+            <div className="history-actions" aria-label="بازگشت تغییرات">
+              <button className="icon-button" disabled={readOnly || viewer || workspaceBusy || history.busy || !history.past.length} onClick={() => void replayWorkspace("undo")} aria-label="برگرداندن آخرین تغییر" title={history.past.length ? `برگرداندن: ${history.past.at(-1)?.title} · Ctrl+Z` : "پس از ثبت تغییر، راه برگشت اینجا آماده می‌شود"}><Undo2 size={18} /></button>
+              <button className="icon-button" disabled={readOnly || viewer || workspaceBusy || history.busy || !history.future.length} onClick={() => void replayWorkspace("redo")} aria-label="انجام دوباره تغییر" title="انجام دوباره · Ctrl+Shift+Z"><Redo2 size={18} /></button>
+              <button className={`icon-button history-open ${history.past.length ? "has-steps" : ""}`} onClick={() => setHistoryOpen(true)} aria-label="راه برگشت تغییرات" title="راه برگشت تغییرات"><History size={18} /></button>
+            </div>
             {updateReady && <button className="icon-button" onClick={() => void installUpdate()} aria-label="نصب نسخهٔ جدید برنامه" title="نسخهٔ جدید آماده است؛ ذخیره و به‌روزرسانی"><RefreshCw size={19} /></button>}
             <button className="icon-button" onClick={toggleTheme} aria-label={theme === "light" ? "فعال کردن حالت تاریک" : "فعال کردن حالت روشن"} title={theme === "light" ? "حالت تاریک" : "حالت روشن"}>
               {theme === "light" ? <Moon size={19} /> : <Sun size={19} />}
@@ -1124,11 +1174,12 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
             />
           )}
           </Suspense><footer className="page-footer">
-            <span>استودیوی سئوی علیرضا ملائی</span>
+            <span>رشدیمو · فضای کار سئوی شما</span>
             <span>داده‌ها متعلق به شماست.</span>
           </footer>
         </main>
       </div>
+      {historyOpen && <WorkspaceHistory past={history.past} future={history.future} busy={history.busy} disabled={readOnly || viewer || workspaceBusy} error={history.error} onClose={() => setHistoryOpen(false)} onUndo={count => void replayWorkspace("undo", count)} onRedo={() => void replayWorkspace("redo")} />}
       {newProject && (
         <div className="modal-backdrop">
           <form

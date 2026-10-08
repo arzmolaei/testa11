@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title Rooyesh - Cloudflare Installer
+title Roshdimo - Cloudflare Installer
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Rooyesh.ps1" -FromLocalSource %*
 set "ROOYESH_RESULT=%ERRORLEVEL%"
 echo.

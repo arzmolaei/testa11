@@ -64,11 +64,12 @@ try {
   assert.equal((await project()).keywords.length, 2005);
   assert.equal((await project()).pages.length, 1);
   assert.equal(await cards.count(), 2);
-  await page.getByRole("button", { name: "واگرد آخرین جداسازی / ادغام" }).click();
+  await page.getByRole("button", { name: "برگرداندن تغییر پیش‌نویس" }).click();
   assert.equal(await cards.count(), 1);
   check("Keyword split and undo change only the draft; original keywords and pages remain intact");
 
   await page.getByLabel("جست‌وجوی پیشنهادهای صفحه").fill("");
+  await page.getByLabel("جست‌وجوی پیشنهادهای صفحه").fill("M-");
   await cards.nth(0).locator('input[type="checkbox"]').check();
   await cards.nth(1).locator('input[type="checkbox"]').check();
   await page.getByRole("button", { name: "ادغام انتخاب‌ها", exact: true }).click();
@@ -77,7 +78,7 @@ try {
   await page.getByLabel("جست‌وجوی پیشنهادهای صفحه").fill("ادغام آزمایشی");
   assert.equal(await cards.count(), 1);
   assert.ok((await cards.first().textContent()).includes("۴۰ کلمه"));
-  await page.getByRole("button", { name: "واگرد آخرین جداسازی / ادغام" }).click();
+  await page.getByRole("button", { name: "برگرداندن تغییر پیش‌نویس" }).click();
   await page.getByRole("button", { name: "لغو انتخاب", exact: true }).click();
   await page.getByLabel("جست‌وجوی پیشنهادهای صفحه").fill("");
   check("Selected groups merge into a review proposal with undo and no committed mutation");
