@@ -54,6 +54,16 @@ function request(
 }
 
 describe("Cloud Worker", () => {
+  it("redirects HTTP to the same HTTPS path before accessing assets or data", async () => {
+    const response = await worker.fetch(new Request("http://seo.example/path?q=1"), {});
+    expect(response.status).toBe(308);
+    expect(response.headers.get("Location")).toBe("https://seo.example/path?q=1");
+  });
+  it("keeps localhost HTTP development available", async () => {
+    const response = await worker.fetch(new Request("http://localhost:8787/api/status"), {});
+    expect(response.status).toBe(200);
+    expect(response.headers.has("Location")).toBe(false);
+  });
   let db: FakeDB;
   let env: Env;
   beforeEach(() => {

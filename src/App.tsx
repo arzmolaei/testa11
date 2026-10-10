@@ -445,8 +445,9 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
         setCloudStatus("syncing");
         const patch = cloudBase.current ? await buildChangeSet(cloudBase.current, sent) : null;
         if (epoch !== cloudEpoch.current || !cloudRef.current.active) break;
-        if (patch && !patch.changes.length) continue;
-        const r = patch
+        const r = patch && !patch.changes.length
+          ? await api("state")
+          : patch
           ? await api("changes", { changes: patch, revision: cloudRef.current.revision })
           : await api("state", { state: sent, revision: cloudRef.current.revision }, "PUT");
         if (epoch !== cloudEpoch.current || !cloudRef.current.active) break;
@@ -561,6 +562,23 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
     )
       void syncCloud(latest.current);
   }, [online, syncCloud]);
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || !onlineRef.current || !ready.current ||
+        readOnly || viewer || hasDraft() || transferInProgress.current || cloudBusy.current ||
+        !cloudRef.current.active || !latest.current) return;
+      // Persist pending edits first; the same guarded sync path handles both
+      // cloud reads and writes without replacing unrelated local changes.
+      flushLocalPending.current?.();
+      void saving.current.then(() => {
+        if (cloudRef.current.active && latest.current) void syncCloud(latest.current);
+      });
+    };
+    const timer = window.setInterval(refresh, 30000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [syncCloud, readOnly, viewer]);
   useEffect(() => {
     const flush = () => {
       if (document.visibilityState === "hidden") flushLocalPending.current?.();

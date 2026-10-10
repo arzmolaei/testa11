@@ -304,6 +304,12 @@ async function handle(request: Request, env: Env) {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    if (!local && url.protocol === "http:") {
+      url.protocol = "https:";
+      return new Response(null, { status: 308, headers: { Location: url.href, "Cache-Control": "no-store" } });
+    }
     try {
       return await handle(request, env);
     } catch (error) {
