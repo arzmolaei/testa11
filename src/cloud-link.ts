@@ -27,7 +27,9 @@ export function forgetCloudLink(): void {
 
 /** Resume known snapshots without guessing whether an unlinked local copy is newer. */
 export function cloudResumeDecision(localFingerprint: string | null, remoteRevision: number, hasRemote: boolean, link: CloudLink | null): "cloud" | "local" | "review" | "conflict" {
-  if (!hasRemote) return "review";
+  // A brand-new browser has no data to overwrite. Start syncing the initial
+  // workspace; existing local data still requires an explicit safe transfer.
+  if (!hasRemote) return localFingerprint === null && remoteRevision === 0 && !link ? "local" : "review";
   if (localFingerprint === null) return "cloud";
   if (!link) return "review";
   if (localFingerprint === link.fingerprint) return "cloud";

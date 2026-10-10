@@ -347,6 +347,8 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
                 active = !viewer && ownsTab.current;
               } else if (decision === "conflict") {
                 setCloudError("بعضی فیلدهای محلی و ابری هم‌زمان تغییر کرده‌اند؛ نسخهٔ محلی حفظ شد. در تنظیمات، ابتدا پشتیبان بگیرید و نسخهٔ ابری را بررسی کنید.");
+              } else if (decision === "review") {
+                setCloudError("همگام‌سازی ابری فعال نیست؛ تغییرات فقط در همین مرورگر ذخیره می‌شوند. در تنظیمات ← پشتیبان و فضای ابری، ابتدا پشتیبان بگیرید و جهت انتقال را بررسی کنید؛ برای انتقال کارهای این دستگاه، «ارسال نسخه این دستگاه» را انتخاب کنید.");
               }
               if (remoteState && (decision === "cloud" || decision === "local")) {
                 cloudBase.current = remoteState;
@@ -1076,7 +1078,11 @@ function WorkspaceApp({ session, auth }: { session: AuthSession; auth: AuthActio
                 {online
                   ? cloudStatus === "synced"
                     ? "همگام با ابر"
-                    : "حالت محلی"
+                    : cloudStatus === "syncing"
+                      ? "در حال ارسال به ابر"
+                      : cloudStatus === "pending"
+                        ? "در انتظار ذخیره ابری"
+                        : "فقط در همین مرورگر"
                   : "آفلاین · ذخیره محلی"}
               </span>
             </span>
